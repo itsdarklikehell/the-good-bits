@@ -1,0 +1,41 @@
+name: Gource visualization
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  gource:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Gource
+        uses: nbprojekt/gource-action@v1
+        with:
+          gource_opts: >-
+            --max-files 1000
+            --key
+            -800x600
+            --highlight-users
+            --filename-time 3
+            --output-framerate 25
+            -s 0.6
+            --multi-sampling
+            --auto-skip-seconds 0.1
+            --stop-at-end
+            --hide mouse,progress
+
+      - name: Upload video
+        uses: actions/upload-artifact@v4
+        with:
+          name: the-good-bits-gource
+          path: ./gource/gource.mp4
