@@ -1,6 +1,8 @@
 import {
   phraseRegions,
   drumRegions,
+  drumRegionsFrom,
+  fitBeatGrid,
   toMono,
   findNearestZeroCrossing,
   applyFades,
@@ -23,7 +25,9 @@ import {
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
 import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
+import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
+import { createFlip } from "./flip/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
@@ -34,8 +38,8 @@ import { regionStartsToCueFrames, checkM8MarkerLimit } from "./slice-markers.js"
 import { analyzeKeyAndTempo, essentiaAvailable } from "./essentia-bridge.js";
 import { sanitizeSourceBpm, resolveEffectiveTempo, formatBpmText } from "./tempo-override.js";
 import { APP_VERSION } from "./version.js";
-import { createEditableWaveform } from "./editor-waveform.js";
-import { resolveRegions, replaceRegions, resolveSelection } from "./chop-regions.js";
+import { createEditableWaveform, formatEditorTime, normalizeSnapMode } from "./editor-waveform.js";
+import { resolveRegions, replaceRegions, resolveSelection, spliceRegionsFrom } from "./chop-regions.js";
 import { regionsEqual, ensureHistory, commitHistory, canUndo, canRedo, undoHistory, redoHistory } from "./edit-history.js";
 import {
   isIncluded,
@@ -64,6 +68,7 @@ import {
   clearOldChopsFSA,
   clearOldOneShotsFSA,
   clearOldNumberedFilesFSA,
+  clearOldVariationsFSA,
   ZipBatch,
   formatSourcePath,
 } from "./io-fs.js";
@@ -98,8 +103,15 @@ let processing = false;
  */
 const analysisCache = new Map();
 
+// Every source file gets its own id when it enters the queue (see pushSourceFolder), because path
+// plus name is NOT unique: pick two stem exports one by one and both are called "other.m4a" with no
+// relative directory, so they shared a cache entry - the second file showed the first one's key,
+// tempo and chops, and exported them.
+let nextFileUid = 1;
+
 function analysisKey(folder, fileInfo) {
-  return `${folder.id}::${fileInfo.relativeDir || ""}/${fileInfo.name}`;
+  if (!fileInfo.uid) fileInfo.uid = `f${nextFileUid++}`;
+  return `${folder.id}::${fileInfo.uid}::${fileInfo.relativeDir || ""}/${fileInfo.name}`;
 }
 
 /**
@@ -116,6 +128,8 @@ function detectionSignature() {
     extractOneShots,
     params: activeParams()[mode],
     zcSearchMs: exportSettings.zcSearchMs,
+    detectKey: detectionSettings.key,
+    detectTempo: detectionSettings.tempo,
   });
 }
 
@@ -196,6 +210,7 @@ let sessionEpoch = 0;
  */
 function pushSourceFolder(descriptor) {
   descriptor.files = normalizeExportIncludedFiles(normalizeIncludedFiles(descriptor.files));
+  for (const f of descriptor.files) if (!f.uid) f.uid = `f${nextFileUid++}`;
   sourceFolders.push(descriptor);
 }
 
@@ -258,9 +273,18 @@ const LEGACY_PATTERN_MAP = {
 };
 
 const exportSettings = { bitDepth: 24, fadeMs: 5, zcSearchMs: 15 };
-// Key/tempo detection is always attempted (see processOneFile/ensureStretchSourceAnalyzed) - there's
-// no longer a user-facing opt-out. Whether a detected value actually shows up anywhere is a separate,
-// later choice: whether the {key}/{tempo}/{tag} naming tokens are used in a pattern.
+
+// Whether essentia is even asked for a key/tempo, independently of each other and independently of
+// mode - see processOneFile/ensureStretchSourceAnalyzed, both of which pass this straight through as
+// analyzeKeyAndTempo's `want`. This is a different axis from namingSettings' {key}/{tempo}/{tag}
+// tokens: those decide whether an ALREADY-DETECTED value shows up in a name; this decides whether
+// detection is attempted for that value at all. Turning off key detection here is what actually keeps
+// key out of every mode's {tag} at once - most breaks have no meaningful key, and typing a
+// drums-only naming pattern just to drop {key} would be working around the real problem. Off means
+// the corresponding field on `kt` simply never gets set (null, same as a failed detection), which is
+// why nothing downstream needs to know this setting exists: a chop-length fallback for "no tempo"
+// already existed for a failed detection, and it does the right thing for a switched-off one too.
+const detectionSettings = { key: true, tempo: true };
 
 // Which shape the main chop export takes: "individual" (today's one-file-per-chop behaviour,
 // unchanged and still the default) or "markers" (one continuous WAV per source file, with the
@@ -287,6 +311,16 @@ const timestretchSettings = {
   seed: 1,
 };
 
+// Characters queued for a multi-variation export in the Stretch workspace's character browser -
+// see renderStretchCharacterBrowser and the "batch or single" branch in processOneFile's derived-
+// copy write. Empty (the default, and every save from before this existed) means "export exactly
+// the single active character above," unchanged from how this always worked; any keys queued here
+// switch that one write over to one file per queued character, into variations/, instead. A plain
+// Set rather than an array because every real use is membership toggling (checkbox clicks) - order
+// only matters at export/display time, and resolveVariationSet (js/variation-export.js) is what
+// imposes a real, deterministic order on it then.
+const stretchExportVariationKeys = new Set();
+
 // Lo-fi processing chain (output-stage character -> drive -> crunch), applied in that order.
 // Same scope as time-stretch: main chops and the full-file wav/ copy, not one-shots.
 const outputStageSettings = { enabled: false, mode: "cassette", mixPct: 100, intensityPct: 50 };
@@ -310,7 +344,7 @@ const PARAM_SCHEMAS = {
     { key: "minSilenceDuration", label: "Minimum gap to count as silence", min: 0.1, max: 1.0, step: 0.02, unit: "s" },
     { key: "mergeGap", label: "Bridge gaps shorter than", min: 0.05, max: 1.0, step: 0.02, unit: "s" },
     { key: "minLen", label: "Minimum phrase length", min: 0.2, max: 3.0, step: 0.1, unit: "s" },
-    { key: "preferred", label: "Preferred phrase length", min: 5, max: 20, step: 0.5, unit: "s" },
+    { key: "preferred", label: "Split over-long phrases near", min: 5, max: 20, step: 0.5, unit: "s" },
     { key: "maxLen", label: "Maximum phrase length", min: 5, max: 25, step: 0.5, unit: "s" },
     { key: "pad", label: "Padding around each phrase", min: 0, max: 0.5, step: 0.02, unit: "s" },
   ],
@@ -319,7 +353,7 @@ const PARAM_SCHEMAS = {
     { key: "minSilenceDuration", label: "Minimum gap to count as silence", min: 0.2, max: 1.5, step: 0.02, unit: "s" },
     { key: "mergeGap", label: "Bridge gaps shorter than", min: 0.1, max: 1.5, step: 0.02, unit: "s" },
     { key: "minLen", label: "Minimum phrase length", min: 0.5, max: 4.0, step: 0.1, unit: "s" },
-    { key: "preferred", label: "Preferred phrase length", min: 8, max: 25, step: 0.5, unit: "s" },
+    { key: "preferred", label: "Split over-long phrases near", min: 8, max: 25, step: 0.5, unit: "s" },
     { key: "maxLen", label: "Maximum phrase length", min: 8, max: 30, step: 0.5, unit: "s" },
     { key: "pad", label: "Padding around each phrase", min: 0, max: 0.5, step: 0.02, unit: "s" },
   ],
@@ -339,10 +373,22 @@ function activeParams() {
 /**
  * Break-sized drum regions for `bars` bars at `bpm` (falling back to drums-mode's fixed
  * preferred/min/max length when bpm is unknown). Shared by the initial per-file detection pass and
- * by the editor's "Re-chop by bars" action, so there's exactly one place that turns a bar count
+ * by the editor's "By bars" re-chop action, so there's exactly one place that turns a bar count
  * into drumRegions() parameters.
  */
-function computeDrumRegions(mono, sampleRate, bars, bpm) {
+function computeDrumRegions(mono, sampleRate, bars, bpm, { anchorAtStart = false } = {}) {
+  const { drumParams, snapBpm } = drumParamsFor(bars, bpm);
+  drumParams.anchorAtStart = anchorAtStart;
+  return drumRegions(mono, sampleRate, drumParams, snapBpm, snapBpm ? beatGridFor(mono, sampleRate, snapBpm) : null).regions;
+}
+
+/** computeDrumRegions() from `startSec` on, with that point as bar 1 - see drumRegionsFrom(). Returns {regions, anchor, bpm}. */
+function computeDrumRegionsFrom(mono, sampleRate, bars, bpm, startSec) {
+  const { drumParams, snapBpm } = drumParamsFor(bars, bpm);
+  return drumRegionsFrom(mono, sampleRate, drumParams, snapBpm, startSec);
+}
+
+function drumParamsFor(bars, bpm) {
   const barsSec = barsToSeconds(bars, bpm);
   const drumParams = { ...activeParams().drums };
   if (barsSec) {
@@ -350,8 +396,30 @@ function computeDrumRegions(mono, sampleRate, bars, bpm) {
     drumParams.minLen = Math.max(0.4, barsSec * 0.5);
     drumParams.maxLen = barsSec * 1.5;
   } // else: no confident tempo - fall back to the fixed preferred/minLen/maxLen above
-  const snapBpm = drumParams.snapToTempo ? bpm : null;
-  return drumRegions(mono, sampleRate, drumParams, snapBpm).regions;
+  return { drumParams, snapBpm: drumParams.snapToTempo ? bpm : null };
+}
+
+// fitBeatGrid() results per decoded file and tempo. The same fit places the chops and draws the
+// editor's grid, so they can't disagree - and at a few hundred ms on a long file it's worth not
+// redoing on every re-chop and every editor remount. Keyed on the mono buffer itself, so it goes
+// away with the file.
+const beatGridCache = new WeakMap();
+
+/** The file's fitted beat grid ({bpm, downbeat, confidence}) for an estimated tempo, or null if there's no steady pulse to fit. */
+function beatGridFor(mono, sampleRate, bpm) {
+  if (!mono || !(bpm > 0)) return null;
+  let byBpm = beatGridCache.get(mono);
+  if (!byBpm) beatGridCache.set(mono, (byBpm = new Map()));
+  const key = `${sampleRate}:${bpm}`;
+  if (!byBpm.has(key)) byBpm.set(key, fitBeatGrid(mono, sampleRate, bpm));
+  return byBpm.get(key);
+}
+
+/** The tempo a result card's chops are actually cut at: the fitted one when there is a fit, the effective (estimated or typed) one otherwise. */
+function gridBpmFor(state) {
+  const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+  const grid = beatGridFor(state.mono, state.sampleRate, bpm);
+  return grid ? grid.bpm : bpm;
 }
 
 // ---------------------------------------------------------------------------
@@ -387,6 +455,8 @@ const newSessionBtn = $("#new-session-btn");
 const drumOptions = $("#drum-options");
 const drumBarsSelect = $("#drum-bars-select");
 const oneShotsCheckbox = $("#one-shots-checkbox");
+const detectKeyCheckbox = $("#detect-key-checkbox");
+const detectTempoCheckbox = $("#detect-tempo-checkbox");
 const namingPatternEditorHost = $("#naming-pattern-editor-host");
 const namingFolderPatternEditorHost = $("#naming-folder-pattern-editor-host");
 const namingPreviewEl = $("#naming-preview");
@@ -416,6 +486,7 @@ const timestretchSeedInput = $("#timestretch-seed-input");
 const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
+const flipWorkspaceEl = $("#flip-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -624,6 +695,21 @@ oneShotsCheckbox.addEventListener("change", () => {
   saveSettings();
 });
 
+// Changing either toggle makes cachedAnalysis() treat every already-analyzed file as stale (see
+// detectionSignature()) - no explicit invalidateAnalysis() needed, same as drumBars/extractOneShots
+// above.
+detectKeyCheckbox.addEventListener("change", () => {
+  detectionSettings.key = detectKeyCheckbox.checked;
+  updateNamingPreview();
+  saveSettings();
+});
+
+detectTempoCheckbox.addEventListener("change", () => {
+  detectionSettings.tempo = detectTempoCheckbox.checked;
+  updateNamingPreview();
+  saveSettings();
+});
+
 // ---------------------------------------------------------------------------
 // Output naming
 // ---------------------------------------------------------------------------
@@ -647,7 +733,7 @@ namingPatternEditorHost.appendChild(namingPatternEditor.el);
 // chop, so a per-chop number would never mean anything here (see js/naming-tokens.js).
 const namingFolderPatternEditor = createNamingPatternEditor({
   initialValue: namingSettings.folderPattern,
-  tokens: ["name", "tag", "key", "tempo"],
+  tokens: ["name", "folder", "tag", "key", "tempo"],
   onChange: (pattern) => {
     namingSettings.folderPattern = pattern;
     updateNamingPreview();
@@ -663,6 +749,19 @@ namingFolderPatternEditorHost.appendChild(namingFolderPatternEditor.el);
  */
 function formatKeyToken(kt) {
   return kt && kt.key ? (kt.scale === "minor" ? `${kt.key}m` : kt.key) : "";
+}
+
+/**
+ * "C minor" / "unknown" / "unavailable" / "off" - the log/result-card text for a source's detected
+ * key, drawing the same three-way distinction formatBpmText already draws for tempo (see its own
+ * doc comment) plus the one formatBpmText doesn't need: key has no manual-override escape hatch, so
+ * "off" here always means the folder/filename really will have no key in it, not just no DETECTED
+ * one.
+ */
+function formatKeyText(kt) {
+  if (kt.key) return `${kt.key} ${kt.scale || ""}`.trim();
+  if (!detectionSettings.key) return "off";
+  return kt.available ? "unknown" : "unavailable";
 }
 
 /**
@@ -683,14 +782,52 @@ function formatTempoToken(kt) {
  * EFFECTIVE key/tempo (manual override applied, if any - see effectiveTempo()/effectiveKt in
  * processOneFile) so a corrected tempo is what {tempo} actually reflects.
  */
-function buildTaggedStem(stem, kt) {
+function buildTaggedStem(stem, kt, sourceFolderName = "") {
   const resolved = resolveFolderName(namingSettings.folderPattern, {
     name: stem,
+    folder: sourceFolderName,
     tag: buildKeyTempoTag(kt, namingSettings.separator),
     key: formatKeyToken(kt),
     tempo: formatTempoToken(kt),
   });
   return sanitizeForPath(resolved, SAFE_NAME_LIMIT) || stem;
+}
+
+/**
+ * The folder a source file came from, for the {folder} token: the last segment of its path inside
+ * the picked folder, or the picked folder's own name for a file sitting at its root. Loose files
+ * picked one by one have no folder of their own to report - the File System Access API never
+ * exposes one - so they resolve to "".
+ */
+function sourceFolderNameFor(folder, fileInfo) {
+  const rel = fileInfo.relativeDir || "";
+  if (rel) return rel.split("/").filter(Boolean).pop() || "";
+  return folder.isLoose ? "" : folder.name || "";
+}
+
+// Output folder names already handed out during THIS run, so two sources can never write into the
+// same one. Stem exports make this routine rather than theoretical: every folder of them holds a
+// file called other.m4a, so without this they all resolve to the same output name - and since an
+// export clears that folder's previous chops before writing, the second file would delete the
+// first's output as well as overwriting it. Keyed per source folder and per relative directory,
+// which are already distinct output paths.
+const runOutputNames = new Map();
+
+// Output names this run had to change to avoid a clash, for the end-of-run summary.
+const runRenamedOutputs = [];
+
+/** `base`, or `base 2`/`base 3`/... if an earlier file in this run already claimed it. */
+function claimOutputName(folder, fileInfo, base) {
+  const dirKey = `${folder.id}::${fileInfo.relativeDir || ""}`;
+  const key = `${dirKey}::${base.toLowerCase()}`;
+  const taken = runOutputNames.get(key) || 0;
+  runOutputNames.set(key, taken + 1);
+  if (!taken) return base;
+  let n = taken + 1;
+  let candidate = `${base} ${n}`;
+  while (runOutputNames.get(`${dirKey}::${candidate.toLowerCase()}`)) candidate = `${base} ${++n}`;
+  runOutputNames.set(`${dirKey}::${candidate.toLowerCase()}`, 1);
+  return candidate;
 }
 
 /**
@@ -701,7 +838,7 @@ function buildTaggedStem(stem, kt) {
  * combined key+tempo string, while {key}/{tempo} are the same detection split into independent
  * tokens (see js/naming-tokens.js for why both forms stay supported).
  */
-function buildChopFileName(stem, tag, index, kt) {
+function buildChopFileName(stem, tag, index, kt, sourceFolderName = "") {
   const num = String(index).padStart(2, "0");
   let template = (namingSettings.chopPattern || "").trim() || "{number}";
   if (!/\{number\}/i.test(template)) template = `${template} {number}`.trim();
@@ -710,6 +847,7 @@ function buildChopFileName(stem, tag, index, kt) {
     tag,
     key: formatKeyToken(kt),
     tempo: formatTempoToken(kt),
+    folder: sourceFolderName,
     number: num,
   })
     .replace(/\s+/g, " ")
@@ -720,10 +858,19 @@ function buildChopFileName(stem, tag, index, kt) {
 
 /** Refreshes the "here's what that'll look like" example under the naming pattern inputs. */
 function updateNamingPreview() {
-  const sampleKt = { key: "C", scale: "minor", bpm: 120 };
+  // Mirrors whichever detector is switched off, the same way a real file with that detector off
+  // would: the field is simply never populated (see detectionSettings), so its tokens drop out here
+  // exactly as they will in an actual export - rather than showing a sample key/tempo that a real
+  // run with the same settings could never actually produce.
+  const sampleKt = {
+    key: detectionSettings.key ? "C" : null,
+    scale: detectionSettings.key ? "minor" : null,
+    bpm: detectionSettings.tempo ? 120 : null,
+  };
   const sampleTag = buildKeyTempoTag(sampleKt, namingSettings.separator);
-  const folderName = buildTaggedStem("drum_take", sampleKt);
-  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt));
+  const sampleFolder = "session_01";
+  const folderName = buildTaggedStem("drum_take", sampleKt, sampleFolder);
+  const sampleNames = [1, 2, 3].map((i) => buildChopFileName("drum_take", sampleTag, i, sampleKt, sampleFolder));
   namingPreviewEl.textContent = `${folderName}/  ->  ${sampleNames.join(", ")}`;
 }
 
@@ -925,6 +1072,40 @@ const playNice = createPlayNice({
   },
 });
 
+// ---------------------------------------------------------------------------
+// FLIP
+//
+// Same deal as PLAY NICE: it owns its own source, its own settings and its own export destination
+// (see js/flip/controller.js), and borrows the shared machinery rather than duplicating it - the
+// decoder, the AudioContext, the essentia key/tempo bridge, the log panel, the theme-colour lookup
+// the canvas waveforms need, and the File System Access helpers. Nothing about CHOP/STRETCH/BOTH or
+// PLAY NICE changes because this exists.
+//
+// It does NOT get runConformHeavy: FLIP's render is array copying into pre-allocated buffers (see
+// js/flip/render.js), measured in single-digit milliseconds for a four-bar loop, so shipping the
+// channel data to a worker and back would cost more than the work itself.
+// ---------------------------------------------------------------------------
+
+const flip = createFlip({
+  container: flipWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  analyze: analyzeKeyAndTempo,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+  io: {
+    supportsFSA: FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED,
+    pickFiles: (opts) => pickFilesFSA(opts),
+    pickFolder: () => pickFolderFSA(),
+    ensurePermission: ensureReadWritePermission,
+    writeFile: writeFileFSA,
+    ZipBatch,
+  },
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1060,6 +1241,19 @@ function renderStretchCharacterBrowser() {
     characterKey: timestretchSettings.character,
     macroValues: timestretchSettings.macroValues,
     seed: timestretchSettings.seed,
+    exportKeys: stretchExportVariationKeys,
+    onToggleExportKey: (key, checked) => {
+      if (checked) stretchExportVariationKeys.add(key);
+      else stretchExportVariationKeys.delete(key);
+      renderStretchCharacterBrowser();
+      saveSettings();
+    },
+    onClearExportKeys: () => {
+      if (stretchExportVariationKeys.size === 0) return;
+      stretchExportVariationKeys.clear();
+      renderStretchCharacterBrowser();
+      saveSettings();
+    },
     onSelectCharacter: (key) => {
       if (timestretchSettings.character === key) return;
       timestretchSettings.character = key;
@@ -1110,6 +1304,20 @@ function updatePlayNiceVisibility() {
   // The floating mix bar is attached to <body>, not to the workspace, so it has to be told
   // separately - and it pads the page while it's up so nothing hides behind it.
   playNice.setActive(active);
+}
+
+/**
+ * FLIP's workspace replaces the stage the same way PLAY NICE's does, and for the same reason: it
+ * brings its own source zone, its own settings and its own export controls, so the shared dropzone,
+ * results panel and Process/Export bar would all be misleading while it's up. Like PLAY NICE (and
+ * unlike STRETCH) it shows as soon as the task is selected, with nothing loaded - its own drop zone
+ * IS the empty state.
+ */
+function updateFlipVisibility() {
+  const active = task === "flip";
+  flipWorkspaceEl.hidden = !active;
+  // The bottom bar is a flex child of the app shell, not of the workspace, so it's told separately.
+  flip.setActive(active);
 }
 
 // ---------------------------------------------------------------------------
@@ -1413,10 +1621,12 @@ function flushSaveSettings() {
     drumBars,
     extractOneShots,
     chopIntoPieces,
+    detection: detectionSettings,
     naming: namingSettings,
     exportSettings,
     chopExportFormat,
     timestretch: timestretchSettings,
+    stretchExportVariationKeys: [...stretchExportVariationKeys],
     outputStage: outputStageSettings,
     drive: driveSettings,
     crunch: crunchSettings,
@@ -1458,10 +1668,11 @@ function loadSettings() {
 // ---------------------------------------------------------------------------
 
 const TASK_STORAGE_KEY = "good-bits-task-v1";
-// "nice" is PLAY NICE - a fourth task that shares the shell (topbar, stage, log) but none of the
-// batch pipeline: it keeps its own queue, target and export destination inside
-// js/play-nice/controller.js, so nothing about CHOP/STRETCH/BOTH changes when it's selected.
-const TASKS = ["chop", "stretch", "both", "nice"];
+// "nice" is PLAY NICE and "flip" is FLIP - two tasks that share the shell (topbar, stage, log) but
+// none of the batch pipeline: each keeps its own queue/source, settings and export destination
+// inside js/play-nice/controller.js and js/flip/controller.js respectively, so nothing about
+// CHOP/STRETCH/BOTH changes when either is selected.
+const TASKS = ["chop", "stretch", "both", "nice", "flip"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1476,7 +1687,9 @@ function applyTask(next, { persist = true } = {}) {
   updateStretchTaskVisibility();
   updateStretchWorkspaceVisibility();
   updatePlayNiceVisibility();
+  updateFlipVisibility();
   if (task !== "nice") playNice.stopAllPlayback();
+  if (task !== "flip") flip.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -1508,6 +1721,13 @@ taskSwitcherBtns.forEach((btn) => {
 // naming, export settings) a first-time visitor had no way to know were there. It's still just a
 // toggle: closing it is one click away, and the choice is remembered per-browser from then on.
 const RAIL_STORAGE_KEY = "good-bits-rail-v1";
+
+// The waveform editor's Snap granularity (Off, 1/16 ... 4 bars), shared by every card and
+// remembered across sessions - it's a working preference, like zoom habits, not a per-file setting.
+const EDITOR_SNAP_STORAGE_KEY = "good-bits-editor-snap-v1";
+function readEditorSnapMode() {
+  return normalizeSnapMode(readString(EDITOR_SNAP_STORAGE_KEY));
+}
 
 function applyRail(open, { persist = true } = {}) {
   document.documentElement.setAttribute("data-rail", open ? "open" : "closed");
@@ -1541,6 +1761,12 @@ function applySettings(saved) {
   if (typeof saved.extractOneShots === "boolean") {
     extractOneShots = saved.extractOneShots;
     oneShotsCheckbox.checked = extractOneShots;
+  }
+  if (saved.detection) {
+    if (typeof saved.detection.key === "boolean") detectionSettings.key = saved.detection.key;
+    if (typeof saved.detection.tempo === "boolean") detectionSettings.tempo = saved.detection.tempo;
+    detectKeyCheckbox.checked = detectionSettings.key;
+    detectTempoCheckbox.checked = detectionSettings.tempo;
   }
   // chopIntoPieces is no longer stored: it is derived from the task, so a stale saved value would
   // fight applyTask() on load.
@@ -1593,6 +1819,16 @@ function applySettings(saved) {
     }
     updateTimestretchModeVisibility();
     updateCharacterUI();
+  }
+  if (Array.isArray(saved.stretchExportVariationKeys)) {
+    // Same "unknown id quietly drops rather than breaking anything" rule as the single active
+    // character just above - resolveVariationSet is exactly this filter, already written for the
+    // export path itself, so it's reused here rather than duplicating the same registry lookup.
+    const allCharacters = characterGroups().flatMap((g) => g.characters);
+    stretchExportVariationKeys.clear();
+    for (const c of resolveVariationSet(saved.stretchExportVariationKeys, allCharacters)) {
+      stretchExportVariationKeys.add(c.key);
+    }
   }
   if (saved.outputStage) {
     Object.assign(outputStageSettings, saved.outputStage);
@@ -2191,7 +2427,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent();
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2214,8 +2450,9 @@ async function newSession() {
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
   stretchWorkspace.stopAllPlayback();
-  // PLAY NICE keeps its own queue and target, so clearSourceQueue() below doesn't reach it.
+  // PLAY NICE and FLIP keep their own sources, so clearSourceQueue() below doesn't reach either.
   playNice.reset();
+  flip.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";
@@ -2450,15 +2687,22 @@ async function runConformHeavy({ channels, sampleRate, bitDepth, plan, seed, fad
  * both always go through exactly the DSP path Export would use - never a second, possibly-diverging
  * implementation. Always copies the channels first: processRegionsHeavy transfers its input buffers
  * to the worker, which would otherwise detach the caller's (possibly cached, reused-next-time) arrays.
+ *
+ * `characterKey` defaults to the single active character (every existing caller's behaviour,
+ * unchanged) - the multi-variation export (processOneFile) is the one caller that passes a
+ * different character per call, rendering the same channels/ratio/macroValues/seed once per queued
+ * variation. macroValues/seed always come from the live timestretchSettings regardless of which
+ * character is being rendered - see stretchExportVariationKeys' own doc comment for why that's the
+ * deliberate, simple choice rather than tracking a separate macro state per character.
  */
-async function renderStretchAudio(channels, sampleRate, ratio) {
+async function renderStretchAudio(channels, sampleRate, ratio, characterKey = timestretchSettings.character) {
   const [{ blob }] = await processRegionsHeavy({
     sampleRate,
     bitDepth: 24,
     fadeInSamples: 0,
     fadeOutSamples: 0,
     stretchRatio: ratio,
-    character: timestretchSettings.character,
+    character: characterKey,
     macroValues: timestretchSettings.macroValues,
     seed: timestretchSettings.seed,
     regions: [{ channels: channels.map((ch) => Float32Array.from(ch)) }],
@@ -2520,9 +2764,10 @@ async function ensureStretchSourceAnalyzed(folder, fileInfo) {
   const channels = bufferChannels(buffer);
   const mono = toMono(channels);
   const validCached = cachedAnalysis(folder, fileInfo);
-  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
-  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = formatBpmText(effectiveTempo(key, kt), tempoOverrides.has(key), kt.available);
+  const kt = validCached ? validCached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectionSettings.key, tempo: detectionSettings.tempo });
+  const keyText = formatKeyText(kt);
+  const stretchEffectiveBpm = effectiveTempo(key, kt);
+  const bpmText = stretchEffectiveBpm || detectionSettings.tempo ? formatBpmText(stretchEffectiveBpm, tempoOverrides.has(key), kt.available) : "off";
   analysisCache.set(key, {
     signature: detectionSignature(),
     kt,
@@ -2650,10 +2895,12 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // A valid cache entry means Preview already ran essentia over this file and nothing that would
   // move a cut point has changed since, so Export reuses that work instead of repeating it.
   const cached = cachedAnalysis(folder, fileInfo);
-  // Key/tempo detection is always attempted (no user-facing opt-out any more) - see analyzeKeyAndTempo's
-  // {key,tempo} flags, which just mean "attempt this", not "the user asked for it". A failed detection
-  // still comes back as a normal result (kt.key/kt.bpm simply falsy), it never throws.
-  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: true, tempo: true });
+  // Each half of `want` reflects the matching Detect Key/Detect Tempo checkbox (detectionSettings) -
+  // a switched-off detector and a failed one look identical from here on (kt.key/kt.bpm simply
+  // falsy either way; analyzeKeyAndTempo never throws), which is deliberate: everything downstream
+  // that reacts to "no tempo"/"no key" already has to handle a real detection failure, so reusing
+  // that path for "didn't try" needs nothing extra.
+  const kt = cached ? cached.kt : await analyzeKeyAndTempo(mono, buffer.sampleRate, { key: detectionSettings.key, tempo: detectionSettings.tempo });
   if (cached) log(`    reusing the analysis from the last run`);
   // Every musical decision below - the tag, the {tempo} token, bar-based chop length, the stretch
   // ratio - is asking "what tempo should this source be treated as?", which is effectiveBpm, not
@@ -2663,15 +2910,21 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   const isManualTempo = tempoOverrides.has(key);
   const effectiveKt = { ...kt, bpm: effectiveBpm };
   const tag = buildKeyTempoTag(effectiveKt, namingSettings.separator);
-  const taggedStem = buildTaggedStem(stem, effectiveKt);
+  const baseStem = buildTaggedStem(stem, effectiveKt, sourceFolderNameFor(folder, fileInfo));
+  const taggedStem = claimOutputName(folder, fileInfo, baseStem);
+  if (taggedStem !== baseStem) {
+    runRenamedOutputs.push({ file: fileInfo.name, from: baseStem, to: taggedStem });
+    log(`    another file in this run already exports to "${baseStem}" - writing to "${taggedStem}" instead`);
+  }
 
-  const keyText = kt.key ? `${kt.key} ${kt.scale || ""}`.trim() : kt.available ? "unknown" : "unavailable";
-  const bpmText = formatBpmText(effectiveBpm, isManualTempo, kt.available);
+  const keyText = formatKeyText(kt);
+  const bpmText = effectiveBpm || detectionSettings.tempo ? formatBpmText(effectiveBpm, isManualTempo, kt.available) : "off";
 
   // Drums-mode chop length is bar-based, so it genuinely needs a tempo to work from - unlike the
-  // rest of the app, this one processing mode really can't proceed the normal way without one.
-  // Detection itself is unconditional now (see the kt line above), so this only ever fires on a real
-  // detection failure, never on an opt-out that no longer exists.
+  // rest of the app, this one processing mode really can't proceed the normal way without one. This
+  // fires exactly the same way whether there's no tempo because detection failed or because Detect
+  // Tempo is switched off - either way there's nothing to chop bars from except a manual override,
+  // and the fallback-length prompt is the right answer to both.
   if (chopIntoPieces && mode === "drums" && !effectiveBpm) {
     const proceed = await resolveTempoWarning(fileInfo.name);
     if (!proceed) {
@@ -2697,12 +2950,48 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   const fullStretchRatio = resolveStretchRatio(effectiveBpm);
   const fullStretched = fullStretchRatio !== 1;
   const fullLofi = lofiActive();
-  // STRETCH always needs this render for the workspace's Processed pane, even when it would end up
+  // Multi-variation export (Stretch workspace's character browser only - see
+  // stretchExportVariationKeys' own doc comment): with characters queued there, Export writes one
+  // file per queued character into variations/ instead of the usual single derived copy below, so
+  // trying out N stretch types never means running Export N separate times. Resolved once, in the
+  // registry's own display order, so the written files, the log line, and the on-screen "N queued"
+  // count can never disagree about which N. Scoped to task === "stretch" because that's the only
+  // place the checkboxes are reachable - a queue left over from a still-open STRETCH session must
+  // not silently start changing what CHOP/BOTH's per-chop stretch does.
+  const queuedVariations = task === "stretch" ? resolveVariationSet(stretchExportVariationKeys, characterGroups().flatMap((g) => g.characters)) : [];
+  // STRETCH always needs a render for the workspace's Processed pane, even when it would end up
   // identical to Original (ratio 1, lo-fi off) - the whole point of the A/B view is showing that
   // clearly rather than showing nothing. CHOP/BOTH keep the original behaviour: only render (and
   // only ever write) a derived copy when it would actually differ from the source.
   let stretchProcessedForWorkspace = null;
-  if (fullStretched || fullLofi || task === "stretch") {
+  if (queuedVariations.length > 0) {
+    // Idempotent re-run cleanup, same reasoning as clearOldChopsFSA above: a queue that's shrunk
+    // since the last export (a character unchecked) must not leave that character's old file
+    // sitting in variations/ forever.
+    if (isExportIncluded(fileInfo) && folder.kind === "fsa" && !dryRun) {
+      await clearOldVariationsFSA(folder.handle, fileInfo.relativeDir, taggedStem);
+    }
+    const variationBaseStem = `${taggedStem}${fullLofi ? " lofi" : ""}`;
+    const writtenLabels = [];
+    for (const c of queuedVariations) {
+      const variationBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio, c.key);
+      const fileName = variationFileName(variationBaseStem, c.label);
+      await writeOutput(folder, "variations", fileInfo.relativeDir, fileName, variationBlob, zipBatch, fileInfo, dryRun);
+      // Same "don't claim a write that writeOutput() actually skipped" rule as exportMarkerWavForFile.
+      if (dryRun || isExportIncluded(fileInfo)) writtenLabels.push(c.label);
+    }
+    if (writtenLabels.length) log(`    wrote ${writtenLabels.length} variation${writtenLabels.length === 1 ? "" : "s"}: ${writtenLabels.join(", ")}`);
+    // The Processed pane always audits the single ACTIVE character (whatever's selected for live
+    // browsing), whether or not that character happens to also be queued for the batch above - a
+    // small possible duplicate render, accepted for not needing to special-case "was it already
+    // rendered a moment ago as part of the queue".
+    stretchProcessedForWorkspace = await decodeStretchPreview(
+      await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio),
+      resolveCharacter(timestretchSettings.character).label,
+      fullStretchRatio,
+      effectiveBpm
+    );
+  } else if (fullStretched || fullLofi || task === "stretch") {
     const derivedBlob = await renderStretchAudio(channels, buffer.sampleRate, fullStretchRatio);
     if (fullStretched || fullLofi) {
       const derivedName = `${taggedStem}${fullStretched ? " stretched" : ""}${fullLofi ? " lofi" : ""}.wav`;
@@ -2724,6 +3013,9 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
   // barLocked: these chops were cut to a bar grid, so their exact sample length IS the
   // deliverable and the export must not round it off. See exportChopsForRegions.
   const editContext = { folder, fileInfo, stem, tag, taggedStem, effectiveBpm, kt: effectiveKt, barLocked: mode === "drums" && !!effectiveBpm };
+  // Where this source's chops will be written, shown on its card so a batch can be checked for
+  // clashes by eye before Export rather than after.
+  const outputPath = `chops/${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}/`;
   let chopRows = [];
   let chopMarkers = [];
   let oneShotRows = [];
@@ -2881,6 +3173,7 @@ async function processOneFile(folder, fileInfo, zipBatch, folderResultsEl, dryRu
     // break from an incidentally-detected tempo on a phrase-mode source - only this can. Used to
     // gate the waveform editor's beat/bar grid (see mountEditor's createEditableWaveform call),
     // which would be actively misleading on chops that were never bar-quantized to begin with.
+    outputPath,
     isDrumsMode: mode === "drums",
     hasOneShots: mode === "drums" && extractOneShots,
     chopSelectedIndex: previous ? previous.chopSelectedIndex : null,
@@ -2975,7 +3268,7 @@ async function exportChopsForRegions({ folder, fileInfo, regions, stem, tag, tag
   for (let i = 0; i < regionDefs.length; i++) {
     const { startSample, endSample } = regionDefs[i];
     const { blob, seconds } = heavyResults[i];
-    const fileName = buildChopFileName(stem, tag, i + 1, kt);
+    const fileName = buildChopFileName(stem, tag, i + 1, kt, sourceFolderNameFor(folder, fileInfo));
     if (writeIndividualFiles) {
       await writeOutput(folder, "chops", relPath, fileName, blob, zipBatch, fileInfo, dryRun);
       if (wantCleanCopy) {
@@ -3114,7 +3407,7 @@ async function exportSelectedChop(editContext, region, index) {
   });
 
   const relPath = `${fileInfo.relativeDir ? fileInfo.relativeDir + "/" : ""}${taggedStem}`;
-  const fileName = buildChopFileName(stem, tag, index + 1, kt);
+  const fileName = buildChopFileName(stem, tag, index + 1, kt, sourceFolderNameFor(folder, fileInfo));
 
   if (folder.kind === "fsa") {
     const ok = await ensureReadWritePermission(folder.handle);
@@ -3454,7 +3747,7 @@ function renderCollapsedExportOffCard(state) {
  * just reload analysisCache's current regions, because those ARE the edits.
  */
 function renderFileResult(state) {
-  const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped } = state;
+  const { fileName, keyText, bpmText, chopRows, oneShotRows, duration, editContext, chopSkipped, outputPath } = state;
 
   // Export-off files collapse to the compact row above instead of staying fully expanded - this is
   // purely which of the two card shapes gets rendered; the underlying source, its analysis and every
@@ -3488,11 +3781,21 @@ function renderFileResult(state) {
   metaEl.textContent = `key: ${keyText} · tempo: ${bpmText} · ${chopSkipped ? "whole file processed" : `${chopRows.length} chop(s)`}${
     oneShotRows.length ? ` · ${oneShotRows.length} one-shot(s)` : ""
   }`;
+  // The destination, spelled out: two sources writing into one folder used to mean the second
+  // silently replaced the first, and even now that names are made unique automatically, "is this
+  // batch going to collide?" should be answerable by looking rather than by exporting and checking.
+  const destEl = document.createElement("span");
+  destEl.className = "result-file-dest";
+  if (outputPath) {
+    destEl.textContent = `→ ${outputPath}`;
+    destEl.title = `Chops from this source are written to ${outputPath} inside the output folder.`;
+  }
   const titleGroup = document.createElement("div");
   titleGroup.className = "result-file-title-group";
   titleGroup.appendChild(nameEl);
   if (editContext) titleGroup.appendChild(sourceEl);
   titleGroup.appendChild(metaEl);
+  if (outputPath) titleGroup.appendChild(destEl);
   header.appendChild(titleGroup);
 
   const actionsGroup = document.createElement("div");
@@ -3529,7 +3832,7 @@ function renderFileResult(state) {
 
   // Which set of slices the waveform edits. Gated on whether chopping/one-shot extraction was
   // part of THIS file's scope (chopSkipped/hasOneShots), not on the current region COUNT - a
-  // manual "Clear (manual)" re-chop legitimately leaves 0 regions, and the editor needs to stay
+  // manual "Clear all" re-chop legitimately leaves 0 regions, and the editor needs to stay
   // mounted (empty, ready for + Add) rather than disappearing the moment the count hits zero.
   const hasChops = Boolean(editContext) && !chopSkipped;
   const hasShots = Boolean(editContext) && !chopSkipped && state.hasOneShots;
@@ -3596,13 +3899,13 @@ function renderFileResult(state) {
   rechopCountInput.type = "number";
   rechopCountInput.min = "1";
   rechopCountInput.max = "200";
-  rechopCountInput.value = "8";
+  rechopCountInput.value = String(state.rechopCount ?? 8);
   rechopCountInput.className = "rechop-count-input";
   rechopCountInput.title = "Target number of slices";
   rechopCountInput.setAttribute("aria-label", "Target number of slices");
   const rechopCountBtn = document.createElement("button");
   rechopCountBtn.className = "btn btn--ghost btn--small";
-  rechopCountBtn.textContent = "Re-chop by count";
+  rechopCountBtn.textContent = "Equal slices";
   rechopCountBtn.title = "Replace every current chop with this many equal-length slices.";
   const rechopBarsSelect = document.createElement("select");
   rechopBarsSelect.className = "rechop-bars-select";
@@ -3613,25 +3916,55 @@ function renderFileResult(state) {
     opt.textContent = `${bars} bar${bars === 1 ? "" : "s"}`;
     rechopBarsSelect.appendChild(opt);
   }
-  rechopBarsSelect.value = String(drumBars);
+  rechopBarsSelect.value = String(state.rechopBars ?? drumBars);
   const rechopBarsBtn = document.createElement("button");
   rechopBarsBtn.className = "btn btn--ghost btn--small";
-  rechopBarsBtn.textContent = "Re-chop by bars";
+  rechopBarsBtn.textContent = "By bars";
   rechopBarsBtn.title = "Replace every current chop with break-sized loops of this bar length.";
   const rechopAlignLabel = document.createElement("label");
   rechopAlignLabel.className = "check check--inline";
   const rechopAlignCheckbox = document.createElement("input");
   rechopAlignCheckbox.type = "checkbox";
-  rechopAlignCheckbox.checked = true;
+  // Lives on state, not just the element: every re-chop re-renders this card, and a checkbox that
+  // quietly snapped back to ticked after each use made it look like it did nothing.
+  rechopAlignCheckbox.checked = state.rechopAlign ?? true;
   const rechopAlignText = document.createElement("span");
-  rechopAlignText.textContent = "align to audible start";
-  rechopAlignLabel.title = "Skip leading silence so the first slice starts where the audio actually begins.";
+  const rechopHasGrid = !!(state.isDrumsMode && state.editContext && beatGridFor(state.mono, state.sampleRate, state.editContext.effectiveBpm));
+  rechopAlignText.textContent = rechopHasGrid ? "start on downbeat" : "skip leading silence";
+  rechopAlignLabel.title = rechopHasGrid
+    ? "On: chops start on the first detected downbeat. Off: the start of the file is treated as bar 1 (for files already trimmed to the bar). Toggling it re-applies your last re-chop if you haven't edited since."
+    : "On: the first slice starts where the audio actually begins. Off: slices start at 0:00. Toggling it re-applies your last re-chop if you haven't edited since.";
   rechopAlignLabel.append(rechopAlignCheckbox, rechopAlignText);
+  // "From the selected chop": re-chop only from that chop's start onward and leave everything
+  // before it alone - how an intro fill or count-in gets carved off, since the fill is exactly
+  // what throws the whole-file downbeat detection. Only usable while a chop is selected.
+  const rechopFromLabel = document.createElement("label");
+  rechopFromLabel.className = "check check--inline";
+  const rechopFromCheckbox = document.createElement("input");
+  rechopFromCheckbox.type = "checkbox";
+  rechopFromCheckbox.checked = state.rechopFromSelected ?? false;
+  const rechopFromText = document.createElement("span");
+  rechopFromLabel.append(rechopFromCheckbox, rechopFromText);
   const rechopClearBtn = document.createElement("button");
   rechopClearBtn.className = "btn btn--ghost btn--small";
-  rechopClearBtn.textContent = "Clear (manual)";
+  rechopClearBtn.textContent = "Clear all";
   rechopClearBtn.title = "Remove every chop so you can build your own from scratch with + Add.";
-  rechopRow.append(rechopCountInput, rechopCountBtn, rechopBarsSelect, rechopBarsBtn, rechopAlignLabel, rechopClearBtn);
+  const rechopTitle = document.createElement("span");
+  rechopTitle.className = "result-rechop-title";
+  rechopTitle.textContent = "Re-chop";
+  const rechopGroup = (...els) => {
+    const g = document.createElement("div");
+    g.className = "result-rechop-group";
+    g.append(...els);
+    return g;
+  };
+  rechopRow.append(
+    rechopTitle,
+    rechopGroup(rechopCountInput, rechopCountBtn),
+    rechopGroup(rechopBarsSelect, rechopBarsBtn),
+    rechopGroup(rechopAlignLabel, rechopFromLabel),
+    rechopClearBtn
+  );
   block.appendChild(rechopRow);
 
   const applyRow = document.createElement("div");
@@ -3785,7 +4118,14 @@ function renderFileResult(state) {
       color: themeColor,
       // Grid is a drums-mode, main-chops-only reference (one-shot hits aren't bar-quantized) - see
       // state.isDrumsMode's own doc comment for why this can't just check effectiveBpm alone.
-      bpm: editing === "chops" && state.isDrumsMode && state.editContext ? state.editContext.effectiveBpm : null,
+      // The fitted tempo rather than the estimate, so the drawn grid runs at the tempo the chops
+      // were cut at instead of drifting off them across the file.
+      bpm: editing === "chops" && state.isDrumsMode && state.editContext ? gridBpmFor(state) : null,
+      // Where bar 1 is, so the heavier bar lines fall on the real bars - after carving out an intro
+      // that's the carve point, not chop 1.
+      gridStart: state.chopGridStart,
+      snapMode: readEditorSnapMode(),
+      onSnapModeChange: (mode) => writeString(EDITOR_SNAP_STORAGE_KEY, mode),
       // The canonical region state lives in analysisCache, and it's updated the moment a slice
       // changes - not on some later "Apply" click. This is what makes Export always cut where the
       // waveform currently shows, whether or not "Update previews" was ever clicked. Every commit
@@ -3819,6 +4159,7 @@ function renderFileResult(state) {
         }
         highlightRow(idx);
         updateExportSelectedState();
+        if (editing === "chops") refreshRechopFrom();
       },
       onUndo: () => {
         const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
@@ -3928,25 +4269,120 @@ function renderFileResult(state) {
 
   applyBtn.addEventListener("click", () => regeneratePreviews());
 
-  rechopCountBtn.addEventListener("click", () => {
+  /** The chop a "from selected chop" re-chop starts at, or null when that option is off or nothing is selected. */
+  function rechopFromIndex() {
+    const regions = editor ? editor.getRegions() : state.chopMarkers || [];
+    const idx = state.chopSelectedIndex;
+    return rechopFromCheckbox.checked && idx != null && idx >= 0 && idx < regions.length ? idx : null;
+  }
+
+  function refreshRechopFrom() {
+    const regions = editor ? editor.getRegions() : state.chopMarkers || [];
+    const idx = state.chopSelectedIndex;
+    const hasSelection = idx != null && idx >= 0 && idx < regions.length;
+    rechopFromCheckbox.disabled = !hasSelection;
+    rechopFromText.textContent = hasSelection ? `from chop ${String(idx + 1).padStart(2, "0")}` : "from selected chop";
+    rechopFromLabel.title = hasSelection
+      ? `Re-chop from the start of chop ${String(idx + 1).padStart(2, "0")} (${formatEditorTime(regions[idx][0])}) onward, with that point as bar 1. Chops before it are left alone - use it to carve off an intro or fill.`
+      : "Select a chop first. Then re-chopping starts from that chop, with it as bar 1, and leaves everything before it alone - use it to carve off an intro or fill.";
+    // With a start point chosen, there's no downbeat to detect and no leading silence to skip.
+    const fromActive = rechopFromCheckbox.checked && hasSelection;
+    rechopAlignCheckbox.disabled = fromActive;
+    rechopAlignLabel.classList.toggle("is-disabled", fromActive);
+    rechopFromLabel.classList.toggle("is-disabled", !hasSelection);
+  }
+
+  /** Where a re-chop starts when "start on downbeat"/"skip leading silence" is ticked. */
+  function rechopStart() {
+    if (!rechopAlignCheckbox.checked) return 0;
+    const grid = state.isDrumsMode && state.editContext ? beatGridFor(state.mono, state.sampleRate, state.editContext.effectiveBpm) : null;
+    return grid ? grid.downbeat : findAudibleStart(state.mono, state.sampleRate);
+  }
+
+  function rechopByCount(from) {
     const n = Math.max(1, Math.min(200, parseInt(rechopCountInput.value, 10) || 1));
-    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
-    applyNewChopRegions(equalSliceRegions(offset, duration, n));
-    log(`  ${state.fileName}: re-chopped into ${n} equal slice(s)${offset > 0 ? " aligned to audible start" : ""}.`);
+    if (from != null) {
+      return {
+        regions: equalSliceRegions(from, duration, n),
+        anchor: from,
+        message: `re-chopped from ${formatEditorTime(from)} into ${n} equal slice(s)`,
+      };
+    }
+    const offset = rechopStart();
+    return { regions: equalSliceRegions(offset, duration, n), message: `re-chopped into ${n} equal slice(s) from ${offset.toFixed(3)}s` };
+  }
+
+  function rechopByBars(from) {
+    const bars = parseInt(rechopBarsSelect.value, 10);
+    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+    if (from != null) {
+      const res = computeDrumRegionsFrom(state.mono, state.sampleRate, bars, bpm, from);
+      const snapped = Math.abs(res.anchor - from) > 0.0005 ? ` (snapped ${Math.round((res.anchor - from) * 1000)}ms onto the beat)` : "";
+      const tempo = res.bpm ? ` at ${res.bpm.toFixed(2)} BPM` : "";
+      return {
+        regions: res.regions,
+        anchor: res.anchor,
+        message: `re-chopped by ${bars} bar(s)${tempo} from ${formatEditorTime(res.anchor)}${snapped}`,
+      };
+    }
+    const anchorAtStart = !rechopAlignCheckbox.checked;
+    const regions = computeDrumRegions(state.mono, state.sampleRate, bars, bpm, { anchorAtStart });
+    const grid = beatGridFor(state.mono, state.sampleRate, bpm);
+    const where = grid ? (anchorAtStart ? " with bar 1 at 0:00" : ` from the downbeat at ${grid.downbeat.toFixed(3)}s`) : "";
+    const tempo = grid ? ` at ${grid.bpm.toFixed(2)} BPM` : "";
+    return { regions, message: `re-chopped by ${bars} bar(s)${tempo}${where}` };
+  }
+
+  function runRechop(kind) {
+    const fromIdx = rechopFromIndex();
+    const current = editor ? editor.getRegions() : state.chopMarkers || [];
+    const from = fromIdx != null ? current[fromIdx][0] : null;
+    const { regions: fresh, anchor, message } = kind === "bars" ? rechopByBars(from) : rechopByCount(from);
+    const regions = from != null ? spliceRegionsFrom(current, from, anchor, fresh) : fresh;
+    const keptBefore = regions.length - fresh.length;
+    applyNewChopRegions(regions);
+    // Bar 1 for the editor's grid: the carve point, or chop 1 of a whole-file re-chop.
+    state.chopGridStart = from != null ? anchor : regions.length ? regions[0][0] : undefined;
+    if (from != null && fresh.length) {
+      // Keep the first new chop selected, so trying a different bar length from the same point is
+      // one click rather than re-finding it. regeneratePreviews() restores this after re-rendering.
+      state.chopSelectedIndex = keptBefore;
+      const entry = state.analysisKey ? analysisCache.get(state.analysisKey) : null;
+      if (entry) entry.chopSelectedIndex = keptBefore;
+    }
+    // Remembered so toggling the align checkbox can redo it - but only while the chops are still
+    // exactly what it produced, never over manual edits.
+    state.lastRechop = from != null ? null : { kind, regions: regions.map((r) => [...r]) };
+    const kept = from != null ? `, keeping the ${keptBefore} chop(s) before it` : "";
+    log(`  ${state.fileName}: ${message}${kept}.`);
     regeneratePreviews();
+  }
+
+  rechopCountInput.addEventListener("change", () => {
+    state.rechopCount = parseInt(rechopCountInput.value, 10) || 1;
+  });
+  rechopFromCheckbox.addEventListener("change", () => {
+    state.rechopFromSelected = rechopFromCheckbox.checked;
+    refreshRechopFrom();
+  });
+  rechopBarsSelect.addEventListener("change", () => {
+    state.rechopBars = parseInt(rechopBarsSelect.value, 10);
+  });
+  rechopAlignCheckbox.addEventListener("change", () => {
+    state.rechopAlign = rechopAlignCheckbox.checked;
+    const last = state.lastRechop;
+    const current = editor ? editor.getRegions() : state.chopMarkers || [];
+    // Previews round every boundary to a whole sample, so "unchanged" means within a sample or so.
+    const tol = 1.5 / state.sampleRate;
+    const untouched =
+      last &&
+      current.length === last.regions.length &&
+      current.every(([s, e], i) => Math.abs(s - last.regions[i][0]) <= tol && Math.abs(e - last.regions[i][1]) <= tol);
+    if (untouched) runRechop(last.kind);
   });
 
-  rechopBarsBtn.addEventListener("click", () => {
-    const bars = parseInt(rechopBarsSelect.value, 10);
-    const offset = rechopAlignCheckbox.checked ? findAudibleStart(state.mono, state.sampleRate) : 0;
-    const offsetSample = Math.round(offset * state.sampleRate);
-    const subMono = offsetSample > 0 ? state.mono.subarray(offsetSample) : state.mono;
-    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
-    const regions = computeDrumRegions(subMono, state.sampleRate, bars, bpm).map(([s, e]) => [s + offset, e + offset]);
-    applyNewChopRegions(regions);
-    log(`  ${state.fileName}: re-chopped by ${bars} bar(s)${offset > 0 ? " aligned to audible start" : ""}.`);
-    regeneratePreviews();
-  });
+  rechopCountBtn.addEventListener("click", () => runRechop("count"));
+  rechopBarsBtn.addEventListener("click", () => runRechop("bars"));
 
   rechopClearBtn.addEventListener("click", async () => {
     const currentCount = editor ? editor.getRegions().length : 0;
@@ -4005,6 +4441,7 @@ function renderFileResult(state) {
   });
 
   renderLists();
+  refreshRechopFrom();
   mountEditor();
   return block;
 }
@@ -4044,6 +4481,23 @@ function updateProgress(done, total, label) {
 }
 
 /** Runs the batch. `write: false` is Preview - identical work, nothing saved. */
+/**
+ * After a Preview, say plainly whether anything in this batch would have written over anything
+ * else. "Will these collide?" is the question that makes exporting a big batch nerve-wracking, and
+ * it should be answerable from the log without exporting first and inspecting the folder after.
+ */
+function logOutputConflictSummary() {
+  const total = [...runOutputNames.keys()].length;
+  if (!total) return;
+  if (!runRenamedOutputs.length) {
+    log("Output folders: all different - nothing in this batch overwrites anything else.");
+    return;
+  }
+  log(`Output folders: ${runRenamedOutputs.length} renamed so nothing overwrites anything else:`);
+  for (const r of runRenamedOutputs) log(`  ${r.file}: "${r.from}" -> "${r.to}"`);
+  log('  Add {folder} to the folder-name pattern to name them by where they came from instead.');
+}
+
 async function processBatch({ write = true } = {}) {
   // Zero-exportable-files guard (js/file-inclusion.js): Export-only, never Preview - Process must
   // keep working even when every source has "include in export" off (see onExportInclusionChanged()
@@ -4082,6 +4536,10 @@ async function processBatch({ write = true } = {}) {
   // Cleared up front, not just left to be overwritten - a folder skipped entirely this run (no
   // included files, permission denied) must not keep showing a destination from a previous run.
   for (const f of sourceFolders) f.writtenSubdirs = null;
+  // Fresh per run, so numbering is decided by this run's file order alone (which is stable) rather
+  // than accumulating suffixes every time Process is pressed.
+  runOutputNames.clear();
+  runRenamedOutputs.length = 0;
 
   if (task === "stretch") {
     // Usually a no-op (renderFolderList() already keeps this current as files are added/removed) -
@@ -4202,6 +4660,7 @@ async function processBatch({ write = true } = {}) {
       logSuccess(`${status} Exported ${filesDone} file(s).`);
     }
   } else if (dryRun) {
+    logOutputConflictSummary();
     log(
       `${cancelRequested ? "Cancelled." : "Done."} ${totalChops} chop(s) from ${processedFolders} folder(s). ` +
         `Adjust anything you want, then hit Export to save.`

@@ -13,7 +13,7 @@ site on GitHub Pages.
 
 ## Features
 
-- **Four tasks, not a difficulty setting.** The app opens on one question:
+- **Five tasks, not a difficulty setting.** The app opens on one question:
   what are you here to do?
   - **Chop** cuts audio into chops and one-shots. No processing at all -
     original tempo, no colouration.
@@ -23,6 +23,11 @@ site on GitHub Pages.
   - **Play nice** conforms a pile of unrelated loops to one shared tempo and
     key, so samples that had nothing to do with each other can be used
     together. See [Play nice](#play-nice) below.
+  - **Flip** takes one loop and hands it back to you wrong - a batch of
+    automatic remixes of it, eight at a time, rearranged at every scale from
+    whole bars down to micro-fragments, with key-aware pitch mutation. Click
+    through until one of them is better than what you started with. See
+    [Flip](#flip) below.
 
   This replaced a Simple/Advanced toggle, which was the wrong axis: it
   described how much of the interface you could see, said nothing about what
@@ -69,9 +74,14 @@ site on GitHub Pages.
 - **Re-chop and manual chopping, from the editor.** Beyond dragging
   boundaries, a file's card has an explicit (and deliberately destructive)
   **re-chop**: replace every current chop with a target number of
-  equal-length slices, or with break-sized loops at a chosen bar length,
-  optionally aligned to the audio's actual audible start so leading
-  silence doesn't offset every slice. **Clear (manual)** empties the chop
+  equal-length slices (**Equal slices**), or with break-sized loops at a
+  chosen bar length (**By bars**). **Start on downbeat** starts them on the
+  detected first downbeat (untick it to treat 0:00 as bar 1, or - with no
+  tempo - to keep leading silence). **From chop NN** re-chops only from the
+  selected chop onward, with its start as bar 1, and leaves everything
+  before it alone: the way to carve off an intro fill or count-in that
+  throws the phrasing out. A hand-placed start within a beat's tenth (50ms
+  max) snaps onto the beat. **Clear all** empties the chop
   list entirely so you can build one from scratch with **+ Add** - the
   same editor either way, not a separate manual-chopping mode. A single
   edited chop can also be exported on its own with **Export selected**,
@@ -98,9 +108,17 @@ site on GitHub Pages.
   started - flip it off if you want to hand-tune silence sensitivity, phrase
   length targets, fade/click protection, and so on.
 - **Loudness-adaptive silence detection.** Instead of one fixed volume
-  threshold for every file, each recording's own noise floor is measured and
-  the threshold is set relative to it - so quiet and hot recordings both
-  behave sensibly.
+  threshold for every file, the gate is set from both the recording's own
+  noise floor and how loud it actually plays - so a hissy transfer doesn't
+  read its own quiet playing as silence, and a file containing true digital
+  silence doesn't end up with a gate below anything that ever happens.
+- **Phrase chopping follows the playing.** For horns and Rhodes a phrase ends
+  where the line drops away and the next one starts - a breath, a released
+  chord - so boundaries are scored on the dip before an attack and the attack
+  itself, and the cut is placed on the note, to the sample. Lengths vary with
+  the music instead of landing every N seconds; a continuous take with no
+  breath in it is still cut at the most phrase-like point available rather
+  than at whatever frame happened to be quietest.
 - **Auto key and tempo detection** (via [essentia.js](https://mtg.github.io/essentia.js/), see licensing note below), shown per source file and baked into the output folder/file name.
 - **Tempo-locked drum chopping, in bars.** Choose a chop length in bars (1,
   2, 3, 4, 6, 8, 16…) and it's converted to seconds from the detected tempo,
@@ -112,11 +130,13 @@ site on GitHub Pages.
   that file - with an option to apply your choice to the rest of the batch.
 - **Editing chops and one-shots is independent.** A file with both shows a
   Chops / One-shots switch above the waveform; adjusting one set never
-  discards the other. Dragged boundaries snap when you let go - to the beat
-  grid on tempo-locked drum chops, so a hand-placed cut stays on the bar, and
-  to the nearest zero-crossing on everything else, so it stays click-free.
-  Drop a boundary more than a sixteenth from a grid line and it stays exactly
-  where you put it, for when an off-grid cut is the point.
+  discards the other. On tempo-locked drum chops the toolbar's **Snap**
+  granularity (Off, 1/16, 1/8, 1/4, 1/2 bar, 1, 2 or 4 bars - remembered,
+  1 bar by default) makes drags, double-clicks and **+ Add** land on the
+  nearest line of that grid - live while dragging - and Shift+arrow step by
+  it. Bar lines count from bar 1, not from 0:00. **Off**, and
+  everything that isn't tempo-locked, snaps to the nearest zero-crossing on
+  release instead, so a deliberately off-grid cut stays click-free.
 - **One-shot extraction that returns usable hits.** Hits used to be cut hard
   at the next onset, so on a busy break every "one-shot" came out as a ~40ms
   stub with its tail chopped off, and a dedupe pass that clustered on three
@@ -175,12 +195,19 @@ site on GitHub Pages.
   to group similar-sounding hits together, not reliable enough to trust
   in a filename.
 - **Typable output naming, with a live preview.** Type your own chop
-  filename pattern using `{name}`, `{tag}` and `{number}` tokens in any
-  order or combination (a number is always included even if you leave
-  `{number}` out of the pattern, so chops can never silently overwrite
-  each other), pick the separator used inside the auto-generated
-  key/tempo tag, and see an example of the resulting file/folder names
-  update as you type.
+  filename pattern using `{name}`, `{folder}`, `{tag}`, `{key}`, `{tempo}`
+  and `{number}` tokens in any order or combination (a number is always
+  included even if you leave `{number}` out of the pattern, so chops can
+  never silently overwrite each other), pick the separator used inside the
+  auto-generated key/tempo tag, and see an example of the resulting
+  file/folder names update as you type. `{folder}` is the source file's own
+  parent folder, which is what tells stem exports apart when every one of
+  them is called `other.m4a`.
+- **Two sources can never write to the same place.** If two files in a run
+  resolve to the same output folder name, the later ones get ` 2`, ` 3` and
+  so on, and the log says so - without that, the second file's export would
+  overwrite the first's (and clear it first). Each queued file also gets its
+  own analysis, even when it has the same name and path as another.
 - **Click-free boundaries - except where they'd break a loop.** Phrase chops
   and one-shots get their cut points snapped to the nearest zero-crossing plus
   a short fade in/out, so they don't pop at the edges. Bar-locked drum chops
@@ -618,6 +645,417 @@ Only the loop workflow is built today; the role model exists so the one-shot
 workflow can be added without unpicking a tempo assumption spread across five
 files.
 
+## Flip
+
+> Give me this loop back, but wrong.
+
+Everything else in the app takes audio apart so *you* can decide what to do
+with it. **Flip** decides for you, eight times, and lets you throw seven of
+them away.
+
+Drop in one ordinary musical loop - a boring four-bar piano part will do -
+and Flip analyses it, understands it as a piece of music with bars and beats
+in it, and proposes a batch of alternative arrangements. Sometimes it rewrites
+the phrase. Sometimes it repeats something unexpectedly. Sometimes it leaves
+almost everything alone and does one ridiculous roll. Sometimes it finds a new
+melody in the one you already had.
+
+It is deliberately **not** a manual slicer, a pad instrument or a sequencer.
+There is no way to specify an individual edit, because specifying individual
+edits is what your DAW is for. Every control changes the *character* of what
+gets proposed.
+
+### The workflow
+
+1. Pick **Flip** in the top bar and drop a loop on the page.
+2. Check the tempo and key it detected. The tempo *is* the slice grid and the
+   key constrains every transposition, so these are the two things worth a
+   glance before you generate - both are correctable in place.
+3. Choose a remix type. Adjust **Structure**, **Activity** and **Depth** if you
+   want to; the defaults are chosen to be useful.
+4. Press **GENERATE**.
+5. Click down the list. **ORIGINAL** sits at the top in the same shape as the
+   variations, so `ORIGINAL → FLIP 01 → FLIP 02` is one continuous audition
+   rather than an A/B you have to set up. Only one row plays at a time.
+6. Press **GENERATE 8 MORE** until something is interesting. Export the ones
+   that are.
+
+### Presets
+
+Eight one-click starting points that already sound like something, because
+being handed four sliders and told to discover that Structure 85 / Activity 30
+/ Depth 65 / Rolls 90 is "the fills one" is not a way to begin:
+
+| | |
+| --- | --- |
+| **Subtle** | Your loop, with something quietly different about it. Whole bars untouched. |
+| **Bar swap** | Bars and half-bars change places, repeat and answer each other. |
+| **New groove** | Same bars, different rhythm. |
+| **Fills** | Leaves the loop alone and adds fills at the ends of bars and the phrase. |
+| **Melodic** | Finds a new tune in the one you already had. |
+| **Stutter** | The glitchy end - micro-slices, rolls and rapid repeats. |
+| **Rebuild** | Takes the phrase apart and puts it back in a different order. |
+| **Destroy** | Everything, at every scale, as far as it goes. |
+
+Each is a full settings snapshot - including the chop size, because the grid is
+half of what a remix type sounds like - so clicking one always lands on a
+complete, coherent state. Move any slider afterwards and the chip simply stops being
+highlighted - nothing is locked. Everything else lives behind **Fine tuning**.
+
+The overall shape - a division/rearrangement rule crossed with a treatment
+category - is borrowed from the Yamaha RS7000's Loop Remix, whose `TYPE` (how
+the data is divided and rearranged) and `VARIATION` (`NORMAL` / `REVERSE` /
+`BREAK` / `PITCH` / `ROLL`) is the same separation, and which exposes it as
+numbered presets for the same reason.
+
+### Chop size
+
+The chop is the atom - the smallest thing Flip can move. It's sized in musical
+units, from a whole bar down to a thirty-second note:
+
+```
+1 bar    ½ bar    1/4    1/8    1/16    1/32
+```
+
+On an eight-bar loop those give 8, 16, 32, 64, 128 and 256 chops respectively,
+and the readout shows the count, because the count is what you're really
+choosing. This is the RS7000's model - detect the phrase length, pick how many
+chops to cut it into - expressed as a size rather than a raw number so the grid
+stays on the bar line and the label tells you what you're going to hear.
+
+**It matters more than it sounds like it should.** At `1 bar`, whole bars are
+the only thing that can move, and results look like `6 2 3 4 5 5 7 8` - genuine
+bar-level arrangement. At `1/32`, Flip works down to micro-fragments. Measured
+across a batch on an eight-bar loop:
+
+| Chop size | Chops | Avg edit span | Stutters per variation |
+| --- | --- | --- | --- |
+| 1 bar | 8 | 1.00 bars | 1.5 |
+| ½ bar | 16 | 0.62 bars | 1.6 |
+| 1/4 | 32 | 0.44 bars | 1.5 |
+| 1/16 | 128 | 0.32 bars | 2.4 |
+| 1/32 | 256 | 0.32 bars | 4.4 |
+
+Earlier versions sized the grid as a subdivision of the *beat*, which
+structurally forbade a chop bigger than one - so the smallest movable thing was
+always a beat or less, and bar-scale operations could only ever be assembled
+out of runs of small pieces.
+
+Presets pick a chop size of their own (Bar swap wants half-bars; Stutter wants
+sixteenths), and a size that would leave too few chops to rearrange - whole-bar
+chops on a one-bar break - steps finer automatically rather than handing you a
+dead GENERATE button.
+
+### Hierarchical remixing
+
+A loop is not a flat list of slices, and the difference between a remix and a
+glitch plugin is whether the machine knows that. Flip understands the source at
+seven scales at once:
+
+```
+PHRASE
+└── BAR 1 / BAR 2 / BAR 3 / BAR 4
+    └── half-bars
+        └── beats
+            └── half-beats
+                └── slices
+                    └── micro-fragments
+```
+
+Every intervention picks a scale first and a place second, so one variation can
+combine sizes the way an arrangement does:
+
+```
+bar 1  untouched
+bar 2  repeat, roll
+bar 3  reverse a slice, return to an earlier motif
+bar 4  substitute
+```
+
+That bar-by-bar summary is what each variation row actually prints, so you can
+see the shape of a result before you play it, and see at a glance which ones
+left most of your loop alone.
+
+**Why this matters:** the first version of Flip walked the phrase one beat at a
+time and applied one operation per beat it decided to touch. Every edit was
+therefore roughly one beat wide, everywhere - and a remix that edits uniformly
+has no shape. It sounded like generic glitch processing because structurally
+that is what it was.
+
+### Restraint
+
+Flip is comfortable doing nothing. Bars are left alone by *explicit decision*,
+not by failing to be picked, and at low **Activity** most of them will be. A
+good remix might only touch 20-30% of the source; the original material is
+what supplies the musical coherence, and Flip should exploit that rather than
+feel obliged to demonstrate itself constantly.
+
+### Phrase form
+
+Deciding each bar independently produces a scatter of treated and untreated
+bars; music produces *shapes*. So a variation will often adopt a form - `ABAB`,
+`AABA`, `AAAB` - and concentrate its changes accordingly, which is what makes
+the result sound arranged rather than processed: you hear a pattern of change,
+not just change. (The RS7000 exposes the same idea as an `INTERVAL` parameter -
+"remix every other measure".)
+
+It's a weighting, not a rule, and it's mean-neutral: a form redistributes
+activity, it never adds any.
+
+### The opening
+
+Where the loop starts is the first thing you hear, so it's the first thing that
+has to differ between one variation and the next. Flip relocates the entry
+point to another bar line in roughly two thirds of variations at default
+settings - eight alternatives that all begin identically read as one result,
+however different their middles are.
+
+**Structure** still protects the opening, it just no longer protects it almost
+absolutely, and the batch deliberately spreads: the first variation in a batch
+is always the most faithful one.
+
+### Three controls, not one
+
+A single "intensity" slider conflates three different musical intentions.
+These are separate because you want them in different combinations:
+
+| | |
+| --- | --- |
+| **Structure** | How much of the large-scale shape survives. High keeps bars where they are, protects downbeats and the opening, borrows material from nearby, and pushes edits to finer scales so they happen *inside* the existing structure. Low lets bars move, repeat and be substituted wholesale, and takes edits off the beat grid entirely. |
+| **Activity** | How often Flip intervenes at all. Low leaves whole bars untouched. |
+| **Depth** | How far any one intervention goes. Low substitutes a neighbour or repeats a beat; high jumps across the phrase, subdivides into micro-slices, reverses and reaches for wider intervals. |
+
+So **Structure 85 / Activity 25 / Depth 75** gives you something recognisably
+your phrase, mostly left alone, that occasionally does something dramatic -
+which is not expressible with one slider at all.
+
+### Remix types
+
+Not effect presets. A type changes which hierarchy levels are worked at, which
+families of transformation are reached for, where in the bar it prefers to
+intervene, and how it bends your three settings. Two types on identical
+settings produce structurally different music.
+
+| Type | What it does |
+| --- | --- |
+| **Gentle** | Barely touches it. Repeats a beat, substitutes a neighbour, leaves most of the loop alone. |
+| **Groove** | Rhythmic reinterpretation - beats and half-beats move around inside bars that stay put. |
+| **Phrase** | Large-scale restructuring. Bars and half-bars move, repeat and answer each other. Best on melodic material. |
+| **Fill** | Leaves the loop alone and adds fills - rolls, repeats and reverses at the ends of bars and the end of the phrase. |
+| **Repeater** | Builds motifs by repeating what's there - beats, half-bars, groups. Not stutter. |
+| **Cut-up** | Aggressive small-scale rearrangement. Where the glitchier end of Flip lives. |
+| **Reconstruct** | Rebuilds the phrase. Bars and beats change places. |
+| **Wild** | The whole vocabulary at every scale at once. Expect to throw most of these away. |
+| **Mixed** | A bit of everything at every scale, still trying to sound like a version of your loop. The default. |
+
+### The transformation vocabulary
+
+Every operation declares a **family** and the **scales** it makes sense at, so
+the same idea - repeat, reverse, substitute - is written once and applied to a
+bar, a beat or a single slice depending on what was chosen.
+
+- **Structural** — repeat, repeat half, substitute a neighbour, swap halves,
+  jump, return to an earlier motif, A/B/A, call and response, relocate the
+  entry point, and *preserve* (doing nothing, deliberately and on the record).
+- **Micro** — rearrange inside a node, repeat the tail, reverse a group,
+  reverse a slice, stutter.
+- **Break** — drop out, cut a rhythmic gap.
+- **Roll** — its own family and its own pass.
+- **Pitch** — a decoration pass over what the arrangement produced.
+
+Operations compose: call-and-response can answer itself with a reversal, a
+stutter or a rest - but only ones the chosen type would reach for anyway, so
+Repeater never silences anything and Gentle never micro-edits.
+
+### Roll
+
+Roll is a first-class transformation, not a synonym for stutter. It takes one
+fragment and repeats it rapidly to fill a fixed region of musical time, at a
+rate expressed relative to the slice grid so it stays musical whatever the
+slice size is:
+
+- **coarser than a slot** — the roll repeats a *group* of whole slots (a 1/8
+  roll on a 1/16 grid)
+- **finer than a slot** — each slot is subdivided into 2, 3, 4, 6 or 8
+  fragments (1/32, 1/64 and beyond), which is Flip's micro-slicing, now with a
+  musical reason to be where it is
+
+Rolls vary in length (a beat, half a beat, a short burst), can run backwards,
+and can accelerate by doubling their rate as they go. They are placed by
+**musical position** in a pass of their own, independently of wherever the
+structural walk happened to be: a roll belongs at the end of a beat, a bar or
+the phrase. **Fill** weights those positions enormously; **Wild** doesn't care.
+Two rolls are never allowed to overlap.
+
+A roll always *replaces* the time it occupies. It cannot lengthen anything.
+
+### Pitch, and the key
+
+Flip reuses the app's existing key detection rather than growing a second one,
+and constrains transposition to the detected key. Moving a fragment by an
+arbitrary chromatic amount is not a musical accident, it is just wrong notes -
+in A minor, up three semitones lands on C and belongs; up one lands on A# and
+does not.
+
+The unit is **scale degrees**, not semitones, so a third is a third whether it
+happens to be three semitones or four.
+
+**It favours chord tones, not small movements.** This is the opposite of the
+obvious rule and it matters: transposing a *sampled* fragment leaves the rest
+of the loop where it is, so the moved fragment has to agree with harmony that
+is still sounding. That makes thirds, fifths, fourths and octaves the useful
+intervals - they're consonant against whatever the loop is sitting on - while a
+second or a seventh is a passing note: the smallest move on paper and the most
+dissonant one in practice. About 80% of the weight sits on chord tones. (An
+earlier version weighted the second highest of all, which is exactly why in-key
+shifts still sounded like wrong notes.)
+
+**Repeats become sequences.** A sequence - restating a figure transposed by a
+consistent interval each time - is the oldest melodic development technique
+there is, and it's the difference between four transpositions of a fragment and
+a line going somewhere. Descending thirds, ascending thirds and descending
+fifths are the strongest; ascending steps read as a build. A figure repeated
+four times can come back as `root / third / fifth / seventh` - an arpeggio built
+out of your own loop.
+
+**Pitch modes:** `Off`, `Octaves` (always safe - an octave is the same note),
+`In key` (scale-degree moves inside the detected key), `Mixed` (in-key plus
+octaves, with the occasional deliberate surprise once Depth is high).
+
+**Pitch covers musical spans**, not scattered single slices. Its targets are
+rolls (which can rise or fall through the scale as they go), repetitions (which
+become sequences), and **whole bars or half-bars** - "bar 3 is bar 3, a third
+down" is an obvious, instantly musical variation that needs no repetition to
+hang off. Over 85% of transposed slices are part of a transposed span.
+
+In **Octaves** mode the sequences are constrained too, so "octaves" means
+octaves everywhere, including inside a melodic shape.
+
+**Pitch amount** keeps it a minority of the loop - it works best as an accident
+you notice, not as a wash. The detected key is shown next to the tempo and both
+the root and the mode can be corrected; detection gets the mode wrong often
+enough that this matters.
+
+### Batch diversity
+
+Eight seeds on one set of parameters explores one region of the space eight
+times: the details differ, the character doesn't, and you conclude Flip has one
+trick. So each slot in a batch gets a **profile** - a modest push in a
+different direction. One variation stays close to the original, one leans on
+phrase rearrangement, one goes after pitch, one leaves almost everything alone
+and does one big gesture, one fractures at every scale.
+
+Profiles *lean*, they don't override: with Activity at 10, nothing in the batch
+will come back busy. The order is reshuffled per batch so pressing GENERATE
+again deals fresh, but slot 1 is always the most faithful one - the top of the
+list is where you look first.
+
+### Timing: the exported file is always exactly as long as the original
+
+This is structural rather than something the code checks afterwards. A
+variation is a list of instructions with **exactly one instruction per slice of
+the original**, and the renderer writes each one into its own pre-computed
+window. There is no path through it that can produce a longer or shorter file,
+whatever a repeat or an eight-way roll asked for.
+
+So a four-bar 120 BPM loop comes back as a four-bar 120 BPM loop. Drag it into
+Logic and it occupies the same four bars.
+
+### Clicks, gaps and levels
+
+Flip rearranges audio; it should not damage it. The naive fix - a fade in and
+out on every slice - dips the level at every boundary and blunts every attack
+that lands on one, which is exactly what makes chopped-up audio *sound* chopped
+up. Instead:
+
+- A boundary where the incoming audio genuinely continues the outgoing audio is
+  left completely alone. **Stretches you didn't edit come out bit-identical to
+  the original**, including an untouched loop seam.
+- An edit boundary gets a real crossfade, about 1.5ms, using **pre-roll**: the
+  source samples that naturally precede the incoming slice. The crossfade
+  finishes *at* the boundary, so the incoming attack is at full level and
+  completely untouched.
+- Boundaries are counted at fragment level, not slice level. A roll is several
+  hard splices *inside* one slice and they click just as loudly.
+- Pre-roll that falls off either end of the file wraps around, because the
+  source is a loop.
+- Crossfades are linear, not constant-power, because Flip's two sides are often
+  the same material (a repeated fragment crossfading into another copy of
+  itself) where constant-power overshoots and clips.
+- Transposition uses the app's existing duration-preserving pitch shifter, not
+  a playback-rate change, and is applied to whole contiguous regions at once. A
+  transposed region is level-guarded back to the level it came in at, and the
+  shifter is given extra audio past the region so its tail artefact lands in
+  samples that get thrown away.
+- Silence from a drop-out is written zeros, crossfaded in and out like anything
+  else. It's a deliberate rest, not a hole.
+
+### Seeds
+
+Every variation shows its seed, and the seed box is an input, not a label. The
+same **source + settings + key + seed** always produces the same arrangement,
+so a take you liked is recoverable: write the number down (or read it off the
+exported filename), type it into any row, press Enter, and it comes back.
+
+All the randomness in Flip runs through one seeded generator - the same
+`mulberry32` used by the creative time-stretch engines. The only
+non-deterministic thing in the whole feature is where the seeds themselves come
+from.
+
+### Regenerating one at a time
+
+Seven good ones and one dud shouldn't cost you the seven. The **⟳** button on a
+row replaces just that variation, in place, keeping its profile.
+
+Changing a setting doesn't throw the batch away either - the existing
+variations stay playable and are flagged **settings changed**.
+
+### When the tempo is wrong
+
+The detected tempo *is* the slice grid, so a half-time reading doesn't just
+mislabel the file, it halves the resolution of every variation. Flip reuses the
+app's detection with the same **analysis proposes, user overrides** correction
+Stretch has: type a tempo, or use **½** / **×2**.
+
+Two things happen automatically:
+
+- **The grid prefers a whole number of bars.** Detection is rarely exact - a
+  true 120 BPM four-bar loop comes back as 119.87 and asks for 256.3
+  sixteenths - so when a whole-bar count is within reach the grid snaps to it
+  and is then fitted to the file's exact length. This is what keeps bar-level
+  operations lined up with the music.
+- **When nothing musical is within reach, it says so.** A file that comes out
+  as 3.13 bars is almost always a detection failure rather than a strange loop.
+
+If there's no confident tempo at all, Flip divides the loop evenly into four
+bars' worth of slices and says so.
+
+### Export
+
+Each variation exports as a WAV at the source's own sample rate and channel
+count, at 24- or 16-bit, and at exactly the original length. **Export all**
+writes the whole batch - to a folder you pick (Chrome/Edge) or as a zip
+(everywhere else).
+
+Names carry the seed, which is the point of putting it there:
+
+```
+Dusty Piano Cm 80 BPM_FLIP_03_seed458577206.wav
+```
+
+### Limits
+
+- One loop at a time. Flip is not a batch tool; it's a slot machine.
+- It rearranges **time and pitch**, not tempo. Nothing is time-stretched - use
+  **Stretch** or **Play nice** for that.
+- Chops are capped at 512 per loop, so a very long file at `1/32` will be cut
+  more coarsely than the setting implies.
+- At whole-bar chops only single-bar moves are possible, since a bar is the
+  atom. One size finer (`½ bar`) brings grouped movement back.
+- It assumes 4/4.
+- Pitch needs a region of at least ~1024 samples to shift, so transpositions on
+  extremely short micro-fragments are skipped rather than smeared.
+
 ## Quick start
 
 **You must serve this folder over local HTTP - do not just double-click
@@ -736,6 +1174,24 @@ scope**, right below, decides whether that chain also touches one-shots,
 and whether a raw unprocessed copy gets written alongside the processed
 one.
 
+In the Stretch task specifically, the character grid has a small checkbox
+on every card, separate from clicking the card itself to audition it.
+Checking a card queues that character for a **multi-variation export**:
+hit Export with, say, Glitch, Vintage and Tight all checked, and instead of
+the one processed copy you'd normally get, every included source writes
+one file per checked character into a `variations/` folder - `<name>
+Glitch.wav`, `<name> Vintage.wav`, `<name> Tight.wav` - all in a single
+run, at whatever stretch ratio and lo-fi settings are currently set (those
+stay shared across every variation; only the character differs between
+them). The card you have selected for on-screen audition is completely
+independent of what's queued - preview one thing while exporting a batch
+of others, or leave nothing checked to fall back to the single derived
+copy exactly as before. **Clear** next to the character grid empties the
+queue in one click; unchecking everything does the same thing one card at
+a time. Re-running Export against a shrunk queue cleans up any variation
+files from a previous run that are no longer checked, the same way a
+shrinking chop count already tidies up `chops/`.
+
 ## Deploying to GitHub Pages
 
 1. Push this folder to a GitHub repo.
@@ -769,7 +1225,17 @@ Source Folder/
     wav/       <- 24-bit WAV copies of any non-WAV source (WAV sources aren't duplicated here);
                   also holds a full-track processed copy whenever time-stretch and/or a lo-fi
                   stage is on, named "<name> stretched.wav", "<name> lofi.wav", or
-                  "<name> stretched lofi.wav" depending on which are active
+                  "<name> stretched lofi.wav" depending on which are active - UNLESS one or more
+                  characters are queued in the Stretch workspace's character browser (see below),
+                  in which case this single derived copy isn't written at all and variations/
+                  (next) takes over instead
+    variations/                         <- only in the Stretch task, and only once at least one
+        <source file name> C#m 120bpm/     character is queued for export in the character
+            <name> Glitch.wav               browser - one file per queued character, instead of
+            <name> Vintage lofi.wav         the single derived copy wav/ would otherwise hold.
+            ...                              Queuing zero characters (the default) reverts to
+                                             that single wav/ copy - the two are never both
+                                             written for the same source in the same run.
     chops/
         <source file name> C#m 120bpm/
             01.wav
@@ -820,9 +1286,12 @@ silently.
 
 ## Parameters
 
-**Sax/Trumpet and Rhodes** share the same pipeline: find non-silent regions
-above an adaptive threshold, merge nearby ones, then split anything too long
-at its quietest nearby point rather than an arbitrary timestamp.
+**Sax/Trumpet and Rhodes** share the same pipeline: gate the file into runs of
+playing, then cut those runs where a phrase actually ends - a dip in the line
+followed by a fresh attack - placing each boundary on the note, to the sample.
+Anything still longer than the maximum gets the most phrase-like boundary
+available inside it. Phrase length follows the playing; *Preferred phrase
+length* only decides roughly where an over-long stretch is broken.
 
 - *Silence sensitivity* - how many dB above the file's own measured noise
   floor counts as "still silence." Lower = only near-total silence breaks a
@@ -923,9 +1392,12 @@ repo's own (MIT) license.
 
 ## Testing
 
-The core detection algorithms, the WAV/AIFF codec, and the folder/file
-grouping logic are pure functions with no browser dependencies, so they're
-unit-tested with plain Node. `contrast.test.mjs` is the odd one out: it
+The core detection algorithms, the WAV/AIFF codec, the folder/file grouping
+logic and the whole of Flip's remix engine are pure functions with no browser
+dependencies, so they're unit-tested with plain Node. `flip-render.test.mjs`
+is worth knowing about: it asserts the two promises Flip makes about audio -
+that a variation is always exactly as long as its source, and that
+rearranging it introduces no clicks, gaps, level changes or clipping. `contrast.test.mjs` is the odd one out: it
 parses the palette straight out of `css/style.css` and asserts every text
 role against the surface it actually sits on, so a re-tint that drops a
 label under 4.5:1 fails here rather than shipping.
@@ -947,6 +1419,8 @@ node test/play-nice-conform.test.mjs
 node test/play-nice-key-matching.test.mjs
 node test/play-nice-naming.test.mjs
 node test/play-nice-downbeat.test.mjs
+node test/flip-recipe.test.mjs
+node test/flip-render.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the

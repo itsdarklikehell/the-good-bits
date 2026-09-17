@@ -10,7 +10,19 @@
 //
 // Only one instance plays at a time across the whole page (see the module-level `activeInstance`
 // bus below) - starting one stops whichever other instance was playing, so Original and Processed
-// (or two different files' waveforms) can never sound simultaneously by accident.
+// (or two different files' waveforms) can never sound simultaneously by accident. That bus is also
+// what makes FLIP's "click down the list of variations" audition work without any co-ordination
+// between the rows: starting row 4 stops row 3, and nothing is left running behind it.
+//
+// PLAYBACK vs. DRAWING are separate inputs. `mono` is what the waveform is drawn from; `channels`,
+// when given, is what's actually played, so a stereo result auditions in stereo while still being
+// drawn from one summed overview. Passing only `mono` (as the Stretch workspace does) plays mono,
+// exactly as it always did.
+//
+// LOOPING is opt-in per instance (`loop: true`, or setLoop() later). Off, a source is scheduled to
+// stop at the end of the file and the playhead resets - the original behaviour. On, the buffer
+// source loops natively in Web Audio, so the loop point is sample-accurate and gapless rather than
+// re-triggered from a timer, and the playhead wraps against the context clock the same way.
 import { computePeaksInRange } from "./dsp.js";
 
 function formatTime(t) {
@@ -31,11 +43,23 @@ let activeInstance = null;
  * @param {() => AudioContext} opts.getAudioContext  shared context factory (app.js's getAudioContext)
  * @param {() => void} [opts.onPlayStateChange]
  */
-export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRate, duration: initialDuration, color = (_n, f) => f, getAudioContext, onPlayStateChange = () => {} }) {
+export function createPreviewWaveform({
+  mono: initialMono,
+  channels: initialChannels = null,
+  sampleRate: initialRate,
+  duration: initialDuration,
+  color = (_n, f) => f,
+  getAudioContext,
+  onPlayStateChange = () => {},
+  loop = false,
+  height = 64,
+}) {
   // Reassigned by setAudio(); everything below reads these rather than the parameters.
   let mono = initialMono;
+  let channels = initialChannels;
   let sampleRate = initialRate;
   let duration = initialDuration;
+  let looping = !!loop;
   const wrap = document.createElement("div");
   wrap.className = "preview-waveform";
   wrap.tabIndex = 0;
@@ -86,13 +110,15 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
   function currentPos() {
     if (dragPreviewPos != null) return dragPreviewPos;
     if (!playing) return anchorPos;
-    return Math.min(duration, anchorPos + (audioCtx.currentTime - anchorTime));
+    const raw = anchorPos + (audioCtx.currentTime - anchorTime);
+    if (!looping) return Math.min(duration, raw);
+    return duration > 0 ? ((raw % duration) + duration) % duration : 0;
   }
 
   function redraw() {
     const rectWidth = Math.max(100, Math.round(canvas.getBoundingClientRect().width || 300));
     const dpr = Math.min(2, window.devicePixelRatio || 1);
-    const cssH = 64;
+    const cssH = height;
     canvas.width = Math.round(rectWidth * dpr);
     canvas.height = Math.round(cssH * dpr);
     const ctx = canvas.getContext("2d");
@@ -135,8 +161,10 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
   function getBuffer() {
     if (!buffer) {
       audioCtx = audioCtx || getAudioContext();
-      buffer = audioCtx.createBuffer(1, mono.length, sampleRate);
-      buffer.getChannelData(0).set(mono);
+      // Play the real channel layout when there is one; fall back to the drawn mono overview.
+      const src = channels && channels.length && channels[0] && channels[0].length ? channels : [mono];
+      buffer = audioCtx.createBuffer(src.length, src[0].length, sampleRate);
+      for (let c = 0; c < src.length; c++) buffer.copyToChannel(src[c], c);
     }
     return buffer;
   }
@@ -185,6 +213,7 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
     if (startAt >= duration - 0.005) startAt = 0;
     const src = audioCtx.createBufferSource();
     src.buffer = getBuffer();
+    src.loop = looping;
     src.connect(audioCtx.destination);
     src.onended = () => {
       if (source === src) {
@@ -199,7 +228,8 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
     };
     const now = audioCtx.currentTime;
     src.start(now, startAt);
-    src.stop(now + (duration - startAt));
+    // A looping source must never be given a stop time - that's what "loop until stopped" means.
+    if (!looping) src.stop(now + (duration - startAt));
     source = src;
     anchorTime = now;
     anchorPos = startAt;
@@ -287,6 +317,7 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
     const at = currentPos();
     if (playing) pause();
     mono = next && next.mono;
+    channels = (next && next.channels) || null;
     sampleRate = next && next.sampleRate;
     duration = (next && next.duration) || 0;
     buffer = null; // rebuilt lazily by getBuffer() from the new samples
@@ -298,9 +329,22 @@ export function createPreviewWaveform({ mono: initialMono, sampleRate: initialRa
     if (wasPlaying && hasAudio) play(anchorPos);
   }
 
+  /**
+   * Turn looping on or off. Restarts the source when playing, because `loop` is read at start()
+   * time - the playhead is carried over, so this is a mode change rather than a re-trigger.
+   */
+  function setLoop(next) {
+    const want = !!next;
+    if (looping === want) return;
+    looping = want;
+    if (playing) play(currentPos());
+  }
+
   const instance = {
     el: wrap,
     setAudio,
+    setLoop,
+    isLooping: () => looping,
     play: (t) => play(t),
     pause,
     stop,

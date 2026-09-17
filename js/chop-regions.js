@@ -110,3 +110,27 @@ export function addOrSplitRegionAt(regions, time, minSliceSec, duration) {
   next.splice(insertAt, 0, [time, end]);
   return { regions: next, newIndex: insertAt };
 }
+
+/**
+ * The regions for a "re-chop from here": everything before the chosen point kept as it was, and
+ * `newRegions` from the point on. `start` is where the user asked for bar 1 and `anchor` is where it
+ * actually landed (the two differ when the mark was snapped onto the beat). A region that ran up to
+ * or across the point is cut or stretched to end exactly at `anchor`, so the intro and the first new
+ * chop meet with no gap and no overlap; a region that ended well before it keeps its own end.
+ * @param {[number,number][]} existing
+ * @param {number} start
+ * @param {number} anchor
+ * @param {[number,number][]} newRegions
+ * @returns {[number,number][]}
+ */
+export function spliceRegionsFrom(existing, start, anchor, newRegions, tol = 1e-3) {
+  const kept = [];
+  for (const [s, e] of existing) {
+    // The chop the re-chop starts from goes too, even when snapping moved bar 1 a little past it.
+    if (s >= Math.min(start, anchor) - tol) continue;
+    const end = e >= start - tol || e > anchor ? anchor : e;
+    if (end - s > tol) kept.push([s, end]);
+  }
+  kept.sort((a, b) => a[0] - b[0]);
+  return [...kept, ...newRegions.map((r) => [...r])];
+}

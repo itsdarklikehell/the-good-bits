@@ -312,6 +312,24 @@ export function createStretchWorkspace({
   browserTitle.textContent = "Character";
   browserHead.appendChild(browserTitle);
   browser.appendChild(browserHead);
+  // Static help text for the per-card checkbox below - written once, not touched by
+  // renderCharacterBrowser's repeated re-renders (unlike browserExportSummary, whose count changes
+  // every time a checkbox is toggled).
+  const browserExportHint = document.createElement("p");
+  browserExportHint.className = "stretch-character-export-hint";
+  browserExportHint.textContent =
+    "Check any card to queue it for a multi-variation export - Export then writes one file per checked character into variations/, instead of just the active one below.";
+  browser.appendChild(browserExportHint);
+  const browserExportSummary = document.createElement("div");
+  browserExportSummary.className = "stretch-character-export-summary";
+  browserExportSummary.hidden = true;
+  const browserExportCount = document.createElement("span");
+  const browserExportClear = document.createElement("button");
+  browserExportClear.type = "button";
+  browserExportClear.className = "stretch-character-export-clear";
+  browserExportClear.textContent = "Clear";
+  browserExportSummary.append(browserExportCount, browserExportClear);
+  browser.appendChild(browserExportSummary);
   const groupsHost = document.createElement("div");
   groupsHost.className = "stretch-character-groups";
   browser.appendChild(groupsHost);
@@ -437,9 +455,11 @@ export function createStretchWorkspace({
 
   /**
    * opts: { characterKey, macroValues, seed, onSelectCharacter(key), onMacroChange(key,value),
-   * onSeedChange(value), onRandomise() }
+   * onSeedChange(value), onRandomise(), exportKeys (Set of queued character keys),
+   * onToggleExportKey(key, checked), onClearExportKeys() }
    */
   function renderCharacterBrowser(opts) {
+    const exportKeys = opts.exportKeys || new Set();
     groupsHost.innerHTML = "";
     for (const group of characterGroups()) {
       if (!group.characters.length) continue;
@@ -451,22 +471,43 @@ export function createStretchWorkspace({
       const grid = document.createElement("div");
       grid.className = "stretch-character-grid";
       for (const c of group.characters) {
+        const isQueued = exportKeys.has(c.key);
         const card = document.createElement("button");
         card.type = "button";
-        card.className = "stretch-character-card" + (c.key === opts.characterKey ? " is-active" : "");
+        card.className = "stretch-character-card" + (c.key === opts.characterKey ? " is-active" : "") + (isQueued ? " is-queued" : "");
+        // A checkbox living inside a <button> would be invalid markup and unreachable by its own
+        // click semantics, so this is a plain checkbox-styled span, toggled by its own click
+        // handler - stopPropagation() is what keeps that click from also firing onSelectCharacter
+        // and switching the live preview just because the user meant to queue it for export.
+        const checkbox = document.createElement("span");
+        checkbox.className = "stretch-character-card-check" + (isQueued ? " is-checked" : "");
+        checkbox.setAttribute("role", "checkbox");
+        checkbox.setAttribute("aria-checked", String(isQueued));
+        checkbox.title = isQueued ? `Remove ${c.label} from the export queue` : `Queue ${c.label} for a multi-variation export`;
+        checkbox.addEventListener("click", (ev) => {
+          ev.stopPropagation();
+          opts.onToggleExportKey(c.key, !isQueued);
+        });
         const label = document.createElement("span");
         label.className = "stretch-character-card-label";
         label.textContent = c.label;
         const desc = document.createElement("span");
         desc.className = "stretch-character-card-desc";
         desc.textContent = c.description;
-        card.append(label, desc);
+        card.append(checkbox, label, desc);
         card.title = c.description;
         card.addEventListener("click", () => opts.onSelectCharacter(c.key));
         grid.appendChild(card);
       }
       section.appendChild(grid);
       groupsHost.appendChild(section);
+    }
+
+    const queuedCount = exportKeys.size;
+    browserExportSummary.hidden = queuedCount === 0;
+    if (queuedCount > 0) {
+      browserExportCount.textContent = `${queuedCount} variation${queuedCount === 1 ? "" : "s"} queued for export`;
+      browserExportClear.onclick = () => opts.onClearExportKeys && opts.onClearExportKeys();
     }
 
     renderCharacterDetail(opts);

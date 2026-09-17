@@ -1,7 +1,7 @@
 // Node-side unit tests for js/chop-regions.js - the pure decision logic behind "Process must
 // preserve user-edited chops". Run with: node test/chop-regions.test.mjs
 import assert from "node:assert/strict";
-import { resolveRegions, replaceRegions, resolveSelection, splitRegionAt, addOrSplitRegionAt } from "../js/chop-regions.js";
+import { resolveRegions, replaceRegions, resolveSelection, splitRegionAt, addOrSplitRegionAt, spliceRegionsFrom } from "../js/chop-regions.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -203,6 +203,24 @@ test("addOrSplitRegionAt: refuses past the end of the audio or before its start,
 
 test("addOrSplitRegionAt: a click exactly on the end of the audio still refuses (zero-length trailing region)", () => {
   assert.equal(addOrSplitRegionAt([[0, 3]], 5, 0.03, 5), null);
+});
+
+test("spliceRegionsFrom: keeps the intro chops and replaces everything from the point on", () => {
+  const existing = [[0, 2], [2, 6], [6, 10], [10, 14]];
+  const fresh = [[6, 8], [8, 10], [10, 12], [12, 14]];
+  assert.deepEqual(spliceRegionsFrom(existing, 6, 6, fresh), [[0, 2], [2, 6], ...fresh]);
+});
+
+test("spliceRegionsFrom: the chop before the point ends exactly where bar 1 landed after snapping", () => {
+  const existing = [[0, 3], [3, 7]];
+  // Snapped later: the intro is stretched to meet it, no gap.
+  assert.deepEqual(spliceRegionsFrom(existing, 3, 3.02, [[3.02, 5]]), [[0, 3.02], [3.02, 5]]);
+  // Snapped earlier: the intro is cut back, no overlap.
+  assert.deepEqual(spliceRegionsFrom(existing, 3, 2.98, [[2.98, 5]]), [[0, 2.98], [2.98, 5]]);
+});
+
+test("spliceRegionsFrom: a chop that ended well before the point keeps its own end", () => {
+  assert.deepEqual(spliceRegionsFrom([[0, 1], [4, 8]], 4, 4, [[4, 6]]), [[0, 1], [4, 6]]);
 });
 
 console.log(`\n${passed} test(s) passed.`);

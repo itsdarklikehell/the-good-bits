@@ -315,6 +315,7 @@ input[type="checkbox"] { accent-color: var(--accent); }
 .check input { margin: 2px 0 0; flex: none; }
 .check span { min-width: 0; }
 .check--inline { font-family: var(--font-mono); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
+.check--inline.is-disabled { opacity: .45; cursor: not-allowed; }
 
 /* slider + typable number, paired */
 
@@ -698,6 +699,7 @@ input[type="range"]::-moz-range-thumb {
 }
 
 .result-file-meta { color: var(--text-faint); font-size: 11.5px; font-family: var(--font-mono); }
+.result-file-dest { color: var(--accent-2); font-size: 11.5px; font-family: var(--font-mono); overflow-wrap: anywhere; }
 .result-file-header-actions { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .result-file-static { display: flex; flex-direction: column; gap: 8px; }
 
@@ -746,6 +748,17 @@ input[type="range"]::-moz-range-thumb {
 .editable-waveform-toolbar { display: flex; align-items: center; gap: 5px; flex-wrap: wrap; }
 .editable-waveform-toolbar .btn--small { padding: 3px 9px; }
 .editable-waveform-toolbar .is-playing { color: var(--accent); border-color: var(--accent-dim); }
+.editable-waveform-snap { display: flex; align-items: center; gap: 2px; margin-left: 6px; }
+.editable-waveform-snap[hidden] { display: none; }
+.editable-waveform-snap-label {
+  margin-right: 4px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.editable-waveform-snap select.editable-waveform-snap-select { width: auto; font-size: 12px; padding: 2px 6px; }
 
 .editable-waveform-zoom-label {
   margin-left: auto;
@@ -784,7 +797,7 @@ input[type="range"]::-moz-range-thumb {
 .result-rechop-row {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 8px 16px;
   flex-wrap: wrap;
   padding: 8px 10px;
   border: 1px dashed var(--border);
@@ -793,27 +806,27 @@ input[type="range"]::-moz-range-thumb {
 
 .result-rechop-row[hidden] { display: none; }
 
-.rechop-count-input {
-  width: 56px;
-  font: inherit;
-  font-size: 12.5px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 4px 6px;
+.result-rechop-title {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
 }
 
-.rechop-bars-select {
-  font: inherit;
-  font-size: 12.5px;
-  background: var(--bg-raised);
-  border: 1px solid var(--border);
-  color: var(--text);
-  border-radius: var(--radius-sm);
-  padding: 4px 6px;
+.result-rechop-group { display: flex; align-items: center; gap: 6px; }
+.result-rechop-group .check--inline { align-items: center; gap: 6px; }
+.result-rechop-group .check--inline input { margin: 0; }
+.result-rechop-row > .btn:last-child { margin-left: auto; }
+
+/* The base input/select rules set width: 100%, which is what made these fill the whole row. */
+.result-rechop-row input.rechop-count-input,
+.result-rechop-row select.rechop-bars-select {
   width: auto;
+  font-size: 12.5px;
+  padding: 3px 6px;
 }
+.result-rechop-row input.rechop-count-input { width: 52px; }
 
 /* the row matching the slice selected on the waveform */
 .chop-row.is-selected {
@@ -1034,18 +1047,62 @@ input[type="range"]::-moz-range-thumb {
 }
 .stretch-character-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px; }
 
+.stretch-character-export-hint { margin: 0; font-size: 11.5px; line-height: 1.45; color: var(--text-faint); }
+.stretch-character-export-summary {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--accent);
+}
+.stretch-character-export-summary .stretch-character-export-clear { margin-left: auto; }
+
 .stretch-character-card {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 3px;
   align-items: flex-start;
   text-align: left;
-  padding: 8px 10px;
+  padding: 8px 10px 8px 28px;
   border: 1px solid var(--border);
   border-radius: var(--radius-sm);
   background: var(--bg-raised);
   cursor: pointer;
   transition: background .12s ease, border-color .12s ease;
+}
+.stretch-character-card.is-queued { border-color: var(--accent); }
+
+/* The per-card "queue this for a multi-variation export" checkbox - deliberately NOT a real
+   <input type=checkbox> (see stretch-workspace.js's own comment on why), so its checked look is
+   drawn entirely with CSS. Positioned over the card's own left padding, clear of the label/desc
+   text so it never overlaps a long description. */
+.stretch-character-card-check {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 14px;
+  height: 14px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  background: var(--bg-panel);
+}
+.stretch-character-card-check:hover { border-color: var(--accent-dim); }
+.stretch-character-card-check.is-checked {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.stretch-character-card-check.is-checked::after {
+  content: "";
+  position: absolute;
+  left: 4px;
+  top: 1px;
+  width: 4px;
+  height: 8px;
+  border: solid var(--bg-panel);
+  border-width: 0 2px 2px 0;
+  transform: rotate(40deg);
 }
 .stretch-character-card:hover { background: var(--bg-raised-hover); border-color: var(--accent-dim); }
 .stretch-character-card.is-active { background: var(--accent-dim); border-color: var(--accent); }
@@ -1196,7 +1253,14 @@ input[type="range"]::-moz-range-thumb {
 [data-task="nice"] #folder-list,
 [data-task="nice"] #results-panel,
 [data-task="nice"] #output-banner,
-[data-task="nice"] .actionbar { display: none; }
+[data-task="nice"] .actionbar,
+[data-task="flip"] .controls,
+[data-task="flip"] #settings-toggle,
+[data-task="flip"] .stage > .dropzone,
+[data-task="flip"] #folder-list,
+[data-task="flip"] #results-panel,
+[data-task="flip"] #output-banner,
+[data-task="flip"] .actionbar { display: none; }
 
 /* Time-stretch: STRETCH's whole purpose is stretching, so its own enable checkbox (meaningful only
    when stretching is optional, i.e. in BOTH) and the reciprocal "it's just on" note swap in/out
@@ -1266,7 +1330,8 @@ input[type="range"]::-moz-range-thumb {
 .play-nice-workspace[hidden] { display: none; }
 .play-nice { display: flex; flex-direction: column; gap: 14px; }
 
-.pn-panel {
+.pn-panel,
+.flip-panel {
   display: flex;
   flex-direction: column;
   gap: 11px;
@@ -1276,7 +1341,8 @@ input[type="range"]::-moz-range-thumb {
   padding: 13px 15px 15px;
 }
 
-.pn-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
+.pn-panel-head,
+.flip-panel-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
 .pn-panel-head--toggle {
   width: 100%;
   border: none;
@@ -1297,7 +1363,8 @@ input[type="range"]::-moz-range-thumb {
 .pn-method-panel { padding: 9px 15px; }
 .pn-method-row .pn-panel-title { flex-shrink: 0; }
 
-.pn-panel-title {
+.pn-panel-title,
+.flip-panel-title {
   margin: 0;
   font-family: var(--font-display);
   font-size: 13px;
@@ -1325,7 +1392,8 @@ input[type="range"]::-moz-range-thumb {
 .pn-target-pitch-toggle { margin-top: -2px; }
 
 /* drop zones - the same language as the main stage's, at panel scale */
-.pn-dropzone {
+.pn-dropzone,
+.flip-dropzone {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -1336,8 +1404,10 @@ input[type="range"]::-moz-range-thumb {
   border-radius: var(--radius);
   background: var(--bg-raised);
 }
-.pn-dropzone.is-dragover { border-color: var(--accent); background: var(--bg-raised-hover); }
-.pn-dropzone[hidden] { display: none; }
+.pn-dropzone.is-dragover,
+.flip.is-dragover .flip-dropzone { border-color: var(--accent); background: var(--bg-raised-hover); }
+.pn-dropzone[hidden],
+.flip-dropzone[hidden] { display: none; }
 .pn-dropzone--reference { padding: 13px 15px; }
 
 .pn-reference[hidden] { display: none; }
@@ -1368,7 +1438,8 @@ input[type="range"]::-moz-range-thumb {
 }
 .pn-interpret-chips { display: flex; flex-wrap: wrap; gap: 4px; }
 
-.pn-chip {
+.pn-chip,
+.flip-chip {
   font: inherit;
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1380,8 +1451,10 @@ input[type="range"]::-moz-range-thumb {
   cursor: pointer;
   transition: background .12s ease, border-color .12s ease, color .12s ease;
 }
-.pn-chip:hover { color: var(--text); background: var(--bg-raised-hover); }
-.pn-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+.pn-chip:hover,
+.flip-chip:hover { color: var(--text); background: var(--bg-raised-hover); }
+.pn-chip.is-active,
+.flip-chip.is-active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
 
 .pn-method-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
 .pn-method-select { min-width: 170px; }
@@ -1580,7 +1653,8 @@ input[type="range"]::-moz-range-thumb {
 .pn-readout.is-active strong { color: var(--accent-2); }
 
 .pn-warnings { display: flex; flex-direction: column; gap: 4px; }
-.pn-warning {
+.pn-warning,
+.flip-warning {
   margin: 0;
   font-size: 11.5px;
   line-height: 1.45;
@@ -1588,7 +1662,8 @@ input[type="range"]::-moz-range-thumb {
   border-left: 2px solid var(--warn);
   padding-left: 8px;
 }
-.pn-warning.is-error { color: var(--danger); border-left-color: var(--danger); }
+.pn-warning.is-error,
+.flip-warning.is-error { color: var(--danger); border-left-color: var(--danger); }
 
 /* One player, swapped between Original and Conformed, so the A/B keeps its playhead. */
 .pn-ab { display: flex; flex-direction: column; gap: 6px; }
@@ -1761,6 +1836,258 @@ input[type="range"]::-moz-range-thumb {
 .pn-strategy-field select { min-width: 132px; }
 .pn-strategy-hint { margin: -4px 0 0; }
 
+
+/* ===========================================================================
+   FLIP
+   "Give me this loop back, but wrong." One loop in, a batch of automatic
+   remixes out. Its own workspace, built by js/flip/controller.js (+
+   variation-row.js); like PLAY NICE it replaces the stage's normal contents
+   rather than sitting alongside them - see the [data-task="flip"] rules above.
+
+   Almost everything here is the app's existing language reused: .btn, .seg,
+   .field, .slider-row, .preview-waveform, and the panel / drop zone / chip /
+   warning rules it shares with PLAY NICE (the selectors above carry both).
+   What's below is only the parts FLIP genuinely adds - the variation list,
+   which is a row type nothing else has, and its bottom bar.
+   =========================================================================== */
+
+.flip-workspace[hidden] { display: none; }
+.flip { display: flex; flex-direction: column; gap: 14px; }
+
+.flip-panel-head { align-items: baseline; }
+.flip-source-summary,
+.flip-grid-summary,
+.flip-list-summary {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--accent-2);
+  text-align: right;
+}
+
+.flip-dropzone-copy { display: flex; flex-direction: column; gap: 2px; }
+.flip-dropzone-copy strong { font-size: 14px; }
+.flip-dropzone-copy span { font-size: 12px; color: var(--text-dim); }
+.flip-dropzone-actions { display: flex; gap: 7px; }
+
+.flip-loaded { display: flex; flex-direction: column; gap: 9px; }
+.flip-loaded[hidden] { display: none; }
+.flip-loaded-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.flip-loaded-actions { display: flex; gap: 6px; }
+.flip-loaded-name {
+  font-family: var(--font-mono);
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.flip-source-status { margin: 0; font-size: 12px; color: var(--text-faint); }
+.flip-source-status.is-error { color: var(--danger); }
+
+/* Tempo is the slice grid, so the correction controls sit with the loop rather than
+   with the settings - a half-time detection halves the resolution of every variation. */
+.flip-tempo-row { display: flex; flex-wrap: wrap; align-items: center; gap: 7px; }
+.flip-tempo-row[hidden] { display: none; }
+.flip-tempo-label { font-size: 12.5px; color: var(--text-dim); }
+/* Element-qualified deliberately: the generic input[type="number"] rule near the top of this
+   file is (0,1,1) and sets width:100%, which blows a bare class selector's width straight out
+   to the full panel - the same trap .slider-row .slider-number documents. */
+input.flip-bpm-input { flex: 0 0 auto; width: 96px; }
+.flip-tempo-note { font-size: 11.5px; color: var(--text-faint); margin-left: 4px; }
+
+.flip-field { gap: 6px; }
+.flip-seg { align-self: flex-start; }
+.flip-chips { display: flex; flex-wrap: wrap; gap: 5px; }
+.flip-style-blurb { margin: 0; }
+.flip-preset-blurb { margin: 0; min-height: 1.4em; }
+.flip-preset-chip { padding: 5px 13px; font-size: 12px; font-family: var(--font-body); }
+.flip-tweak { margin-top: 4px; }
+.flip-slider-hint { margin: -2px 0 0; }
+.flip-slider-word {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  color: var(--accent-2);
+  min-width: 104px;
+}
+select.flip-key-select { flex: 0 0 auto; width: auto; min-width: 74px; }
+
+/* Pitch is a disclosure, not a panel: the defaults are good and most sessions never open it. */
+.flip-advanced {
+  border-top: 1px solid var(--border-soft);
+  padding-top: 10px;
+  margin-top: 2px;
+}
+.flip-advanced > .flip-advanced-summary {
+  cursor: pointer;
+  list-style: none;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+}
+.flip-advanced-summary::-webkit-details-marker { display: none; }
+.flip-advanced-summary::before { content: "▸ "; font-size: 10px; }
+.flip-advanced[open] > .flip-advanced-summary::before { content: "▾ "; }
+.flip-advanced-summary:hover { color: var(--text-dim); }
+.flip-advanced[open] > .flip-advanced-summary { margin-bottom: 10px; }
+.flip-advanced .field + .field { margin-top: 10px; }
+
+.flip-empty { margin: 0; font-size: 12.5px; color: var(--text-faint); }
+.flip-empty[hidden] { display: none; }
+.flip-row-list { display: flex; flex-direction: column; gap: 4px; }
+
+/* One variation. The ROW is the play button - clicking anywhere that isn't another
+   control toggles it - because the entire workflow is clicking down this list at speed.
+   The original sits at the top in the same shape, so ORIGINAL -> FLIP 01 -> FLIP 02 is
+   one continuous audition rather than an A/B you have to set up. */
+/* A FIXED GRID, not a flex row, and that is the whole point: every row uses the same column
+   template, so the waveforms all share one time axis. Sized by content it drifts badly - the
+   original has no seed box or buttons to make room for, so its waveform drew 387px wide against
+   240px for the variations and the source looked like a longer file than the things rendered from
+   it; and the "settings changed" badge appearing pulled every variation from 298px to 240px, so
+   changing a setting resized every waveform on the page at the exact moment you wanted to compare
+   them. Empty cells on the original row cost nothing and keep the axis honest. */
+.flip-row {
+  display: grid;
+  grid-template-columns: 30px 74px minmax(140px, 1.2fr) minmax(0, 1fr) 126px 64px;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 10px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-sm);
+  cursor: pointer;
+}
+.flip-row[hidden] { display: none; }
+.flip-row:hover { background: var(--bg-raised-hover); }
+.flip-row.is-playing { border-color: var(--accent); }
+.flip-row.is-stale { opacity: .72; }
+.flip-row--original { border-color: var(--border); background: var(--bg-panel); }
+
+.flip-row-play {
+  width: 30px;
+  padding: 3px 0;
+  text-align: center;
+}
+.flip-row.is-playing .flip-row-play { color: var(--accent-2); border-color: var(--accent-dim); }
+
+.flip-row-id {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-display);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.flip-row.is-playing .flip-row-id { color: var(--text); }
+
+/* The waveform is inline rather than stacked so a full batch fits on one screen; its
+   own transport bar is hidden because the row already is one. */
+.flip-row-wave { min-width: 0; }
+.flip-row-wave .preview-waveform-bar { display: none; }
+
+.flip-row-desc-wrap { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.flip-row-desc {
+  flex: 0 1 auto;
+  min-width: 0;
+  font-size: 11.5px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Fixed cells, so their contents can appear and disappear without moving the waveform column.
+   126px is the seed field's own 84px plus its label and gap; 64px is two icon buttons. */
+.flip-row-meta { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+.flip-row-actions { display: flex; justify-content: flex-end; gap: 4px; min-width: 0; }
+
+/* Editable, not a label: a seed you wrote down has to be typeable back in, or the
+   promise that nothing good is ever lost isn't one. */
+.flip-seed { display: flex; align-items: center; gap: 5px; }
+.flip-seed-label { font-size: 10.5px; color: var(--text-faint); text-transform: uppercase; letter-spacing: .06em; }
+input.flip-seed-input {
+  flex: 0 0 auto;
+  width: 84px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.flip-stale {
+  flex: 0 0 auto;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: var(--accent-dim);
+  color: var(--text);
+  white-space: nowrap;
+}
+.flip-stale[hidden] { display: none; }
+
+/* Bottom bar: GENERATE is the point of the screen, so it never scrolls away.
+   Same shell position and treatment as PLAY NICE's mix bar. */
+.flip-bar {
+  flex: none;
+  background: var(--bg-panel);
+  border-top: 1px solid var(--border);
+}
+.flip-bar[hidden] { display: none; }
+.flip-bar-inner {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 8px 16px;
+}
+.flip-bar-controls { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
+.flip-bar-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+  margin-left: auto;
+  padding-left: 14px;
+  border-left: 1px solid var(--border);
+}
+
+.flip-generate {
+  font: inherit;
+  font-family: var(--font-display);
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+  padding: 7px 18px;
+  white-space: nowrap;
+  border: 1px solid var(--accent);
+  border-radius: var(--radius-sm);
+  background: var(--accent);
+  color: var(--on-accent);
+  cursor: pointer;
+}
+.flip-generate:hover { background: var(--accent-2); border-color: var(--accent-2); }
+.flip-generate:disabled { opacity: .45; cursor: default; }
+.flip-generate:focus-visible { outline: 2px solid var(--accent-2); outline-offset: 2px; }
+
+.flip-loop-btn.is-active { background: var(--accent-dim); border-color: var(--accent-dim); color: var(--text); }
+select.flip-size-select,
+select.flip-depth-select { flex: 0 0 auto; width: auto; min-width: 104px; }
+
+.flip-bar-status {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-faint);
+  white-space: nowrap;
+}
+.flip-bar-status.is-working { color: var(--accent-2); }
+
 /* ===========================================================================
    RESPONSIVE
    Below the breakpoint the fixed-chrome shell stops making sense, so the
@@ -1793,6 +2120,23 @@ input[type="range"]::-moz-range-thumb {
   .pn-mixbar-inner { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
   .pn-mixbar-wave { order: 10; flex-basis: 100%; }
   .pn-mixbar-actions { margin-left: auto; padding-left: 0; border-left: none; }
+
+  /* A variation row squeezed onto one line gives the waveform ~60px and the description
+     ~70px, which makes both useless. The six-column grid gives way to a wrapping flex row:
+     identity and transport stay on the first line, and the waveform and what happened get the
+     full width underneath. Every row still wraps identically, so the shared time axis survives. */
+  .flip-row { display: flex; flex-wrap: wrap; row-gap: 6px; }
+  .flip-row-play { order: 1; flex: 0 0 auto; }
+  .flip-row-id { order: 2; flex: 1 1 auto; }
+  .flip-row-meta { order: 3; flex: 0 0 126px; }
+  .flip-row-actions { order: 4; flex: 0 0 64px; }
+  .flip-row-wave { order: 5; flex: 1 1 100%; }
+  .flip-row-desc-wrap { order: 6; flex: 1 1 100%; }
+  .flip-row-desc { white-space: normal; }
+
+  .flip-bar-inner { flex-wrap: wrap; gap: 8px; padding: 8px 12px; }
+  .flip-bar-actions { margin-left: auto; padding-left: 0; border-left: none; }
+  .flip-tempo-note { margin-left: 0; flex: 1 1 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -2,8 +2,8 @@
   "name": "the-good-bits",
   "private": true,
   "type": "module",
-  "version": "1.2.0",
-  "description": "The Good Bits: browser-based auto sample chopper and loop conformer. Silence/phrase detection for melodic sources, tempo-locked loop chopping and one-shot extraction for drums, auto key/tempo detection, and PLAY NICE - conform unrelated loops to a shared tempo and key. Static site, deploy as-is to GitHub Pages.",
+  "version": "1.7.0",
+  "description": "The Good Bits: browser-based auto sample chopper, loop conformer and loop remixer. Silence/phrase detection for melodic sources, tempo-locked loop chopping and one-shot extraction for drums, auto key/tempo detection, PLAY NICE - conform unrelated loops to a shared tempo and key - and FLIP, which takes one loop and proposes batches of automatic remixes of it. Static site, deploy as-is to GitHub Pages.",
   "scripts": {
     "serve": "npx http-server -c-1 .",
     "test": "node --test test/*.test.mjs"

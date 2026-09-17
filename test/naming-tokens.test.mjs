@@ -201,4 +201,24 @@ test("resolveFolderName: {number} is not a recognised part of this call's contra
   assert.equal(resolveFolderName("{name} {number}", { name: "drum_take", tag: "", key: "", tempo: "" }), "drum_take");
 });
 
+test("{folder} resolves to the source's own folder, telling identically-named stems apart", () => {
+  const pattern = "{folder} {name} {tag}";
+  assert.equal(
+    resolveFolderName(pattern, { folder: "1971 Sax Warm-Up", name: "other", tag: "Cm 88bpm" }),
+    "1971 Sax Warm-Up other Cm 88bpm"
+  );
+  // Loose files have no folder of their own; the token drops out without leaving a double space.
+  assert.equal(resolveFolderName(pattern, { folder: "", name: "other", tag: "Cm 88bpm" }), "other Cm 88bpm");
+});
+
+test("{folder} is a real token in patterns, not literal text", () => {
+  assert.deepEqual(parsePatternToSegments("{folder}/{number}"), [
+    { type: "token", key: "folder" },
+    { type: "text", value: "/" },
+    { type: "token", key: "number" },
+  ]);
+  assert.ok(isKnownToken("folder"));
+  assert.equal(resolveNamePattern("{folder}_{number}", { folder: "take2", number: "01" }), "take2_01");
+});
+
 console.log(`\n${passed} test(s) passed.`);

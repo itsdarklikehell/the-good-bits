@@ -16,7 +16,9 @@ import {
   pickOnsets,
   snapToBeatGrid,
   refineGridStart,
+  fitBeatGrid,
   drumRegions,
+  drumRegionsFrom,
   findNearestZeroCrossing,
   applyFades,
   toMono,
@@ -169,6 +171,100 @@ test("phraseRegions: end-to-end on a 3-phrase synthetic sax-like signal", () => 
   assert.equal(regions.length, 3, `expected 3 phrases, got ${JSON.stringify(regions)}`);
 });
 
+/**
+ * A run of separately-attacked notes with no silence between them - legato playing, which is where
+ * gate-and-split has nothing to work with. `dipAfter` inserts a quiet moment (a breath, a released
+ * chord) after that many notes, the thing that actually ends a phrase.
+ */
+function noteRun(count, noteSec = 0.8, freq = 440, { dipAfter = null, dipSec = 0.35, dipAmp = 0.02, hissAmp = 0 } = {}) {
+  const parts = [];
+  for (let i = 0; i < count; i++) {
+    const n = Math.round(noteSec * SR);
+    const out = new Float32Array(n);
+    for (let k = 0; k < n; k++) {
+      // Each note attacks and decays a little, so it reads as a note rather than one held tone.
+      out[k] = 0.7 * Math.sin((2 * Math.PI * (freq + i * 20) * k) / SR) * Math.exp((-k / SR) * 1.2);
+    }
+    parts.push(out);
+    if (dipAfter != null && i === dipAfter - 1) {
+      const d = new Float32Array(Math.round(dipSec * SR));
+      for (let k = 0; k < d.length; k++) d[k] = dipAmp * Math.sin((2 * Math.PI * 300 * k) / SR);
+      parts.push(d);
+    }
+  }
+  const sig = concat(...parts);
+  if (hissAmp) {
+    let seed = 7;
+    for (let i = 0; i < sig.length; i++) {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      sig[i] += hissAmp * (seed / 1073741824 - 1);
+    }
+  }
+  return sig;
+}
+
+/** Start of the first note after `t`, as these synthetic runs lay them out. */
+function noteStartAfter(t, noteSec, dipSec, dipAfter) {
+  return dipAfter * noteSec + dipSec;
+}
+
+test("phraseRegions: splits continuous playing at the breath, not at an arbitrary target length", () => {
+  const noteSec = 0.8;
+  const dipSec = 0.35;
+  const sig = noteRun(10, noteSec, 440, { dipAfter: 5, dipSec });
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 18, preferred: 11, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.equal(regions.length, 2, `expected the two phrases either side of the breath, got ${JSON.stringify(regions)}`);
+  const expected = noteStartAfter(0, noteSec, dipSec, 5);
+  assert.ok(
+    Math.abs(regions[1][0] - expected) < 0.12,
+    `phrase 2 should start on the note after the breath (${expected}s), got ${regions[1][0]}s`
+  );
+});
+
+test("phraseRegions: every phrase starts on a note attack, never part-way into one", () => {
+  const noteSec = 0.8;
+  const dipSec = 0.35;
+  const dipAfter = 6;
+  const sig = noteRun(12, noteSec, 440, { dipAfter, dipSec });
+  // Where the notes actually are, breath included - what a phrase start has to land on.
+  const noteStarts = [];
+  for (let i = 0; i < 12; i++) noteStarts.push(i * noteSec + (i >= dipAfter ? dipSec : 0));
+  // A short maxLen forces splits inside continuous playing, where there is no breath to find.
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 4, preferred: 3, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.ok(regions.length >= 3, `expected maxLen to force several phrases, got ${regions.length}`);
+  for (const [s] of regions) {
+    const nearest = noteStarts.reduce((a, b) => (Math.abs(b - s) < Math.abs(a - s) ? b : a));
+    assert.ok(
+      s <= nearest + 0.02 && s >= nearest - 0.1,
+      `phrase starting at ${s.toFixed(2)}s should sit just before the note at ${nearest.toFixed(2)}s`
+    );
+  }
+});
+
+test("phraseRegions: a hissy transfer keeps its audio instead of being gated away", () => {
+  // Tape hiss puts the noise floor high enough that "floor + margin" lands in the middle of the
+  // playing - which used to throw away most of the file.
+  const sig = noteRun(8, 0.8, 440, { dipAfter: 4, hissAmp: 0.03 });
+  const p = { silenceMarginDb: 10, minSilenceDuration: 0.5, mergeGap: 0.55, minLen: 1.8, maxLen: 20, preferred: 13, pad: 0.18 };
+  const { regions } = phraseRegions(sig, SR, p);
+  const covered = regions.reduce((sum, [s, e]) => sum + (e - s), 0);
+  const duration = sig.length / SR;
+  assert.ok(covered > duration * 0.85, `only ${(100 * covered / duration).toFixed(0)}% of the file ended up in a chop`);
+});
+
+test("phraseRegions: digital silence in the file doesn't break the gate", () => {
+  // A file with true -inf silence reports a noise floor of -180dB, so a floor-relative gate sits
+  // below anything that ever happens and nothing reads as a gap.
+  const sig = concat(silence(1.0), noteRun(4, 0.8), silence(0.8), noteRun(4, 0.8, 520), silence(1.0));
+  const p = { silenceMarginDb: 18, minSilenceDuration: 0.5, mergeGap: 0.4, minLen: 0.8, maxLen: 18, preferred: 11, pad: 0.12 };
+  const { regions } = phraseRegions(sig, SR, p);
+  assert.equal(regions.length, 2, `expected the two phrases, got ${JSON.stringify(regions)}`);
+  assert.ok(regions[0][0] > 0.5, `phrase 1 should start at the music, not in the leading silence (got ${regions[0][0]}s)`);
+  assert.ok(regions[1][1] < sig.length / SR - 0.5, `phrase 2 should end at the music, not in the trailing silence (got ${regions[1][1]}s)`);
+});
+
 // --- drum / onsets ---------------------------------------------------------
 
 test("onsetStrengthCurve + pickOnsets: detects periodic hits", () => {
@@ -296,6 +392,110 @@ test("refineGridStart: refuses a correction too large to be editing slop", () =>
   // coarse anchor has to stand rather than the grid jumping onto a different subdivision.
   const anchor = 0.02 + bar / 8;
   assert.equal(refineGridStart(sig, SR, bpm, anchor, 4), anchor);
+});
+
+/**
+ * A rock beat at an exact tempo: kick on 1 and 3, snare on 2 and 4, quiet hats on every eighth.
+ * Hits are placed at absolute sample positions so the tempo really is exact over the whole file.
+ * `startBeat` shifts which beat of the bar the file opens on (3 = a snare pickup on beat 4).
+ */
+function rockBeat(bpm, seconds, { phase = 0.1, startBeat = 0 } = {}) {
+  const out = new Float32Array(Math.round(seconds * SR));
+  const beat = 60 / bpm;
+  let seed = 12345;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 1073741824) - 1;
+  const add = (t, len, fn) => {
+    const s0 = Math.round(t * SR);
+    for (let i = 0; i < Math.round(len * SR) && s0 + i < out.length; i++) out[s0 + i] += fn(i / SR);
+  };
+  for (let e = 0; phase + (e / 2) * beat < seconds; e++) {
+    const t = phase + (e / 2) * beat;
+    add(t, 0.03, (x) => 0.08 * noise() * Math.exp(-x * 150));
+    if (e % 2) continue;
+    const beatInBar = (e / 2 + startBeat) % 4;
+    if (beatInBar === 0 || beatInBar === 2) add(t, 0.15, (x) => 0.9 * Math.sin(2 * Math.PI * 60 * x) * Math.exp(-x * 25));
+    else add(t, 0.12, (x) => 0.6 * noise() * Math.exp(-x * 30));
+  }
+  return out;
+}
+
+test("fitBeatGrid: corrects a tempo estimate that is a few hundredths of a BPM out", () => {
+  // The real failure: Essentia read a straight 123.00 break as 123.047, and cut boundaries
+  // walked tens of milliseconds off the downbeat by the end of the file.
+  const sig = rockBeat(123, 60, { phase: 0.1 });
+  const grid = fitBeatGrid(sig, SR, 123.046875);
+  assert.ok(grid, "expected a fit on a steady beat");
+  const lastBeat = Math.floor((60 - 0.2) / (60 / 123));
+  const driftMs = Math.abs(lastBeat * (60 / grid.bpm - 60 / 123)) * 1000;
+  assert.ok(driftMs < 3, `fitted ${grid.bpm} BPM drifts ${driftMs.toFixed(1)}ms by the end of the file`);
+  assert.ok(grid.downbeat <= 0.1 + 0.001 && grid.downbeat > 0.1 - 0.006, `downbeat ${grid.downbeat}s should sit on or just before the kick at 0.1s`);
+});
+
+test("fitBeatGrid: bar 1 is the kick, not a snare pickup the file happens to open on", () => {
+  const bpm = 120;
+  const sig = rockBeat(bpm, 40, { phase: 0.1, startBeat: 3 }); // opens on beat 4
+  const grid = fitBeatGrid(sig, SR, bpm);
+  assert.ok(grid, "expected a fit");
+  const expected = 0.1 + 60 / bpm; // the first kick
+  assert.ok(Math.abs(grid.downbeat - expected) < 0.006, `downbeat ${grid.downbeat}s, expected the kick at ${expected}s`);
+});
+
+test("fitBeatGrid: no fit on material with no pulse", () => {
+  assert.equal(fitBeatGrid(tone(10, 220, 0.5), SR, 120), null);
+  assert.equal(fitBeatGrid(silence(10), SR, 120), null);
+});
+
+test("drumRegions: chops stay on the downbeat across a long file despite a slightly wrong tempo", () => {
+  const sig = rockBeat(123, 90, { phase: 0.1 });
+  const est = 123.046875;
+  const chop = barsToSeconds(4, est);
+  const { regions, bpm } = drumRegions(sig, SR, { preferred: chop, minLen: chop / 2, maxLen: chop * 1.5, onsetSensitivity: 0.65 }, est);
+  const bar = (4 * 60) / 123;
+  for (let i = 0; i < regions.length - 1; i++) {
+    const barsIn = (regions[i][0] - 0.1) / bar;
+    const offMs = Math.abs(barsIn - Math.round(barsIn)) * bar * 1000;
+    assert.ok(offMs < 6, `chop ${i + 1} starts ${offMs.toFixed(1)}ms off the downbeat (tempo used ${bpm})`);
+    assert.ok(Math.abs((regions[i][1] - regions[i][0]) / bar - 4) < 0.002, `chop ${i + 1} is not 4 bars`);
+  }
+});
+
+test("drumRegions: anchorAtStart treats 0:00 as bar 1", () => {
+  const sig = rockBeat(120, 30, { phase: 0.1 });
+  const p = { preferred: 8, minLen: 4, maxLen: 12, onsetSensitivity: 0.65, anchorAtStart: true };
+  const { regions } = drumRegions(sig, SR, p, 120);
+  assert.equal(regions[0][0], 0);
+  assert.ok(Math.abs(regions[1][0] - 8) < 0.01, `second chop should start 4 bars in, got ${regions[1][0]}`);
+});
+
+test("drumRegionsFrom: carves off an intro fill and chops whole bars from the chosen point", () => {
+  const bpm = 120;
+  const bar = 2;
+  // A 3.3s intro fill: loud off-grid hits at a different rate, which is what wrecks whole-file
+  // downbeat detection. The groove starts right after it.
+  const intro = new Float32Array(Math.round(3.3 * SR));
+  for (let t = 0.05; t < 3.2; t += 0.17) {
+    const s0 = Math.round(t * SR);
+    for (let i = 0; i < 0.08 * SR; i++) intro[s0 + i] += 0.8 * Math.sin((2 * Math.PI * 200 * i) / SR) * Math.exp((-i / SR) * 40);
+  }
+  const groove = rockBeat(bpm, 40, { phase: 0 });
+  const sig = concat(intro, groove);
+  const downbeat = intro.length / SR;
+  const p = { preferred: 4 * bar, minLen: 2 * bar, maxLen: 6 * bar, onsetSensitivity: 0.65 };
+  // A hand-placed mark 15ms late of the real downbeat.
+  const { regions, anchor } = drumRegionsFrom(sig, SR, p, bpm, downbeat + 0.015);
+  assert.ok(Math.abs(anchor - downbeat) < 0.004, `bar 1 should snap to the downbeat at ${downbeat}s, got ${anchor}s`);
+  assert.ok(regions.length >= 4);
+  assert.equal(regions[0][0], anchor);
+  for (let i = 0; i < regions.length - 1; i++) {
+    assert.ok(Math.abs((regions[i][1] - regions[i][0]) / bar - 4) < 0.002, `chop ${i + 1} is not 4 bars`);
+  }
+});
+
+test("drumRegionsFrom: a mark nowhere near a beat is used as-is", () => {
+  const sig = rockBeat(120, 30, { phase: 0 });
+  const p = { preferred: 8, minLen: 4, maxLen: 12, onsetSensitivity: 0.65 };
+  const { anchor } = drumRegionsFrom(sig, SR, p, 120, 4.25); // halfway between beats
+  assert.ok(Math.abs(anchor - 4.25) < 1 / SR);
 });
 
 test("drumRegions: produces loop-length chops close to preferred length", () => {

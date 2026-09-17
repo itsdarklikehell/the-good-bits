@@ -196,6 +196,32 @@ export async function clearOldOneShotsFSA(sourceDirHandle, relDir, stem) {
   return clearOldNumberedFilesFSA(sourceDirHandle, "one shots", relDir, stem);
 }
 
+/**
+ * Delete every .wav file in a variations/relDir/stem destination directory (idempotent re-runs).
+ * Not the NN.wav pattern clearOldNumberedFilesFSA looks for: a variation export is named by
+ * character ("loop Glitch.wav"), not by a running number, and that named set can shrink between
+ * runs (uncheck a character) exactly the way a shrinking chop count already does - so this clears
+ * the whole directory rather than trying to guess which specific names might now be stale. Safe to
+ * be this blunt because nothing else ever writes into a source's own variations/ folder.
+ */
+export async function clearOldVariationsFSA(sourceDirHandle, relDir, stem) {
+  try {
+    const root = await sourceDirHandle.getDirectoryHandle("variations", { create: false });
+    const destDir = await getNestedDirHandle(root, relDir ? `${relDir}/${stem}` : stem, false);
+    for await (const [name, handle] of destDir.entries()) {
+      if (handle.kind === "file" && /\.wav$/i.test(name)) {
+        try {
+          await destDir.removeEntry(name);
+        } catch (_) {
+          /* ignore */
+        }
+      }
+    }
+  } catch (_) {
+    /* destination didn't exist yet - nothing to clear */
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Legacy <input webkitdirectory> / <input multiple> path
 // ---------------------------------------------------------------------------

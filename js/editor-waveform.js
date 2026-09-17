@@ -24,6 +24,24 @@ import { addOrSplitRegionAt } from "./chop-regions.js";
 const SHARED_EPS_SEC = 0.006;
 const MIN_SLICE_SEC = 0.03;
 
+/** Snap granularities offered on tempo-locked material, as [value, label, length in beats]. 4/4 assumed, like the grid. */
+export const SNAP_OPTIONS = [
+  ["off", "Off", 0],
+  ["1/16", "1/16", 0.25],
+  ["1/8", "1/8", 0.5],
+  ["1/4", "1/4 (beat)", 1],
+  ["1/2bar", "1/2 bar", 2],
+  ["bar", "1 bar", 4],
+  ["2bar", "2 bars", 8],
+  ["4bar", "4 bars", 16],
+];
+
+/** A stored snap value, made valid: unknown values (and the retired "beat") map onto an option. */
+export function normalizeSnapMode(mode) {
+  if (mode === "beat") return "1/4";
+  return SNAP_OPTIONS.some(([v]) => v === mode) ? mode : "bar";
+}
+
 export function formatEditorTime(t) {
   const m = Math.floor(t / 60);
   const s = (t - m * 60).toFixed(2);
@@ -51,6 +69,11 @@ export function viewXToTime(xRel, width, viewStart, viewDuration) {
  *   nudge near a bar line has something to line up against. Omit/null for anything that isn't
  *   tempo-locked drum material (phrase-mode chops, one-shots, an unconfident/no detection) - the
  *   grid is a drums-mode-only convenience, not a general metronome overlay.
+ * @param {number} [opts.gridStart]        time of a bar line (bar 1) for that grid, so the heavier bar
+ *   lines land on real bars; defaults to where chop 1 starts
+ * @param {string} [opts.snapMode] how hand-placed boundaries snap to that grid - one of SNAP_OPTIONS'
+ *   values ("off", "1/16" ... "4bar"); see snap()
+ * @param {(mode:string)=>void} [opts.onSnapModeChange] fired when the toolbar's Snap control changes it
  * @param {()=>void} opts.onChange          fired whenever the slice list changes
  * @param {(idx:number|null)=>void} opts.onSelect
  * @param {()=>void} [opts.onUndo]          fired by the Undo button or Cmd/Ctrl+Z - the canonical
@@ -68,6 +91,9 @@ export function createEditableWaveform({
   zcSearchMs = 15,
   color = (_n, f) => f,
   bpm = null,
+  gridStart = null,
+  snapMode = "bar",
+  onSnapModeChange = () => {},
   onChange = () => {},
   onSelect = () => {},
   onUndo = () => {},
@@ -104,7 +130,29 @@ export function createEditableWaveform({
   const fitBtn = mkBtn("Fit", "Zoom to fit");
   const zoomLabel = document.createElement("span");
   zoomLabel.className = "editable-waveform-zoom-label";
-  toolbar.append(playBtn, stopBtn, loopBtn, addBtn, deleteBtn, undoBtn, redoBtn, zoomOutBtn, zoomInBtn, fitBtn, zoomLabel);
+  toolbar.append(playBtn, stopBtn, loopBtn, addBtn, deleteBtn, undoBtn, redoBtn, zoomOutBtn, zoomInBtn, fitBtn);
+  // Snap: only offered where there's a tempo grid to snap to.
+  const snapGroup = document.createElement("div");
+  snapGroup.className = "editable-waveform-snap";
+  snapGroup.setAttribute("role", "group");
+  snapGroup.setAttribute("aria-label", "Snap to grid");
+  const snapLabel = document.createElement("span");
+  snapLabel.className = "editable-waveform-snap-label";
+  snapLabel.textContent = "Snap";
+  snapGroup.appendChild(snapLabel);
+  const snapSelect = document.createElement("select");
+  snapSelect.className = "editable-waveform-snap-select";
+  snapSelect.title = "Drags, double-clicks and + Add snap to the nearest line of this grid, and Shift+←/→ steps by it. Off places boundaries freely (nudged to the nearest zero crossing).";
+  for (const [value, label] of SNAP_OPTIONS) {
+    const opt = document.createElement("option");
+    opt.value = value;
+    opt.textContent = label;
+    snapSelect.appendChild(opt);
+  }
+  snapSelect.addEventListener("change", () => setSnapMode(snapSelect.value));
+  snapSelect.setAttribute("aria-label", "Snap granularity");
+  snapGroup.appendChild(snapSelect);
+  toolbar.append(snapGroup, zoomLabel);
   wrap.appendChild(toolbar);
 
   const canvas = document.createElement("canvas");
@@ -135,10 +183,37 @@ export function createEditableWaveform({
   // every boundary it is supposed to help line up against. Captured once at mount so later
   // drags move boundaries against a fixed grid rather than dragging the grid with them.
   const beatSec = bpm > 0 ? 60 / bpm : 0;
-  const gridPhase =
-    beatSec && initialRegions && initialRegions.length
-      ? ((initialRegions[0][0] % beatSec) + beatSec) % beatSec
-      : 0;
+  const barAnchor = gridStart != null ? gridStart : initialRegions && initialRegions.length ? initialRegions[0][0] : 0;
+  const gridPhase = beatSec ? ((barAnchor % beatSec) + beatSec) % beatSec : 0;
+  // Which beat index (counted from gridPhase) is a bar line - without it every 4th beat from the
+  // start of the file got the bar weight, which is only right when bar 1 is in the first beat.
+  const barBeatOffset = beatSec ? ((Math.round((barAnchor - gridPhase) / beatSec) % 4) + 4) % 4 : 0;
+  snapGroup.hidden = !beatSec;
+  function setSnapMode(mode, { silent = false } = {}) {
+    snapMode = normalizeSnapMode(mode);
+    snapSelect.value = snapMode;
+    if (silent) return;
+    onSnapModeChange(snapMode);
+    scheduleRedraw(); // the hint line describes what Shift+arrow does in this mode
+  }
+  setSnapMode(snapMode, { silent: true });
+
+  /** The grid step hand edits snap to right now, in seconds, or 0 when snapping to the grid is off. */
+  function gridStep() {
+    const option = beatSec ? SNAP_OPTIONS.find(([v]) => v === snapMode) : null;
+    return option ? option[2] * beatSec : 0;
+  }
+
+  /** Nearest line of the current snap grid to `t` (bar lines are measured from bar 1, not from 0). */
+  function gridLineNear(t, dir = 0) {
+    const step = gridStep();
+    // Measured from bar 1, so bar and multi-bar lines fall on real bars; bar 1 is itself on a
+    // beat, so every finer division lines up too.
+    const origin = barAnchor;
+    const n = (t - origin) / step;
+    const k = dir > 0 ? Math.floor(n + 1e-6) + 1 : dir < 0 ? Math.ceil(n - 1e-6) - 1 : Math.round(n);
+    return origin + k * step;
+  }
   let viewStart = 0;
   let viewDuration = Math.max(duration, MIN_VIEW_SEC);
   let dragging = null;
@@ -193,15 +268,12 @@ export function createEditableWaveform({
    * milliseconds further off the grid every cycle. A cut on the bar line doesn't need the
    * click protection anyway: the sample after the chop's end is the sample at its start.
    *
-   * Beat resolution rather than bar, so a deliberate half- or quarter-bar chop is still
-   * possible, and only within a sixteenth of a line - drop a boundary in the middle of a beat
-   * and it stays exactly where you put it.
+   * The Snap control picks the grid: Bar (the default - a chop that loops is whole bars), Beat
+   * (for half- and quarter-bar chops), or Off, which falls through to the zero-crossing snap for
+   * placing a boundary somewhere deliberately off the grid.
    */
   function snap(t) {
-    if (beatSec) {
-      const line = gridPhase + Math.round((t - gridPhase) / beatSec) * beatSec;
-      return Math.abs(line - t) <= beatSec / 4 ? line : t;
-    }
+    if (gridStep()) return Math.max(0, Math.min(duration, gridLineNear(t)));
     if (!mono || !sampleRate) return t;
     const win = Math.max(1, Math.round((zcSearchMs / 1000) * sampleRate));
     return findNearestZeroCrossing(mono, Math.round(t * sampleRate), win) / sampleRate;
@@ -273,7 +345,7 @@ export function createEditableWaveform({
         ctx.lineWidth = 1;
         for (let n = firstBeat; gridPhase + n * beatSec <= lastTime; n++) {
           if (n < 0) continue;
-          const isBar = n % 4 === 0;
+          const isBar = (n - barBeatOffset) % 4 === 0;
           if (isBar ? !drawBars : !drawBeats) continue;
           const x = timeToX(gridPhase + n * beatSec, w);
           if (x < 0 || x > w) continue;
@@ -396,7 +468,7 @@ export function createEditableWaveform({
     } else {
       hint.textContent = `${noun} ${String(selected + 1).padStart(2, "0")} selected · ${formatEditorTime(
         slices[selected].s
-      )} to ${formatEditorTime(slices[selected].e)} · Space plays, Delete removes, Shift+←/→ nudges the start, Shift+Alt+←/→ the end, Shift+click to select more`;
+      )} to ${formatEditorTime(slices[selected].e)} · Space plays, Delete removes, Shift+←/→ ${gridStep() ? `moves the start by ${SNAP_OPTIONS.find(([v]) => v === snapMode)[1]}` : "nudges the start"}, Shift+Alt+←/→ the end, Shift+click to select more`;
     }
   }
 
@@ -592,7 +664,9 @@ export function createEditableWaveform({
     let s = Math.max(precEnd, centerTime - defaultLen / 2);
     let e = Math.min(nextStart, centerTime + defaultLen / 2);
     s = Math.max(precEnd, snap(s));
-    e = Math.min(nextStart, snap(e));
+    // On a grid, a new slice is one grid step long - snapping both ends independently could land
+    // them on the same line.
+    e = gridStep() ? Math.min(nextStart, s + gridStep()) : Math.min(nextStart, snap(e));
     if (e - s < MIN_SLICE_SEC) e = Math.min(nextStart, s + MIN_SLICE_SEC);
     if (e - s < MIN_SLICE_SEC) s = Math.max(precEnd, e - MIN_SLICE_SEC);
     if (e - s < MIN_SLICE_SEC) return; // window too tight even unsnapped - refuse rather than overlap
@@ -639,7 +713,12 @@ export function createEditableWaveform({
       // Snapping to the nearest zero-crossing can walk the point back across the tolerance just
       // cleared above - clamp into the still-valid interior of the SAME containing slice rather than
       // either producing an invalid split or letting the snap silently pick a different one.
-      finalTime = Math.max(r.s + MIN_SLICE_SEC, Math.min(r.e - MIN_SLICE_SEC, snap(t)));
+      const snapped = snap(t);
+      // On a grid, the nearest line can be this slice's own edge (a 2-bar snap inside a 2-bar
+      // chop). Clamping would cut a sliver off beside it - there's no line inside to split on, so
+      // do nothing.
+      if (gridStep() && (snapped - r.s < MIN_SLICE_SEC || r.e - snapped < MIN_SLICE_SEC)) return;
+      finalTime = Math.max(r.s + MIN_SLICE_SEC, Math.min(r.e - MIN_SLICE_SEC, snapped));
     } else {
       // Empty space: the window available for a new region runs from the end of whichever region
       // precedes the click (0 if none) up to the start of whichever region follows it (the file's
@@ -653,7 +732,9 @@ export function createEditableWaveform({
       if (nextStart - t < MIN_SLICE_SEC) return;
       // Same clamp shape as the split branch above: never let the snap walk the new region's start
       // out of the empty space it's meant to occupy, in either direction.
-      finalTime = Math.max(precEnd, Math.min(nextStart - MIN_SLICE_SEC, snap(t)));
+      const snapped = snap(t);
+      if (gridStep() && (snapped < precEnd || nextStart - snapped < MIN_SLICE_SEC)) return; // same: no line in this gap
+      finalTime = Math.max(precEnd, Math.min(nextStart - MIN_SLICE_SEC, snapped));
     }
     const result = addOrSplitRegionAt(
       slices.map((sl) => [sl.s, sl.e]),
@@ -859,7 +940,10 @@ export function createEditableWaveform({
       }
     }
     if (dragging.kind === "boundary") {
-      moveBoundary(dragging.refs, xToTime(ev.clientX - rect.left, rect.width));
+      // With a grid snap on, the boundary jumps line to line while dragging, so where it will land
+      // is visible before letting go.
+      const t = xToTime(ev.clientX - rect.left, rect.width);
+      moveBoundary(dragging.refs, gridStep() ? snap(t) : t);
       scheduleRedraw();
       if (boundaryTouchesPlayingSlice(dragging.refs)) applyLiveBoundaryUpdate();
     } else if (dragging.kind === "pan") {
@@ -913,7 +997,8 @@ export function createEditableWaveform({
     if (selected == null || !slices[selected]) return;
     const refs = boundaryRefsFor(selected, which);
     const current = slices[refs[0].idx][refs[0].which];
-    moveBoundary(refs, current + direction * NUDGE_SEC);
+    // Snapped to a grid, a nudge steps to the next line rather than 1ms at a time.
+    moveBoundary(refs, gridStep() ? gridLineNear(current, direction) : current + direction * NUDGE_SEC);
     redraw();
     if (boundaryTouchesPlayingSlice(refs)) applyLiveBoundaryUpdate();
     clearTimeout(nudgeCommitTimer);

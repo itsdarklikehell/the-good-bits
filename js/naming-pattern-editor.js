@@ -23,6 +23,7 @@ import { parsePatternToSegments, segmentsToPattern } from "./naming-tokens.js";
 
 const TOKEN_META = [
   { key: "name", label: "{name}", title: "The source file's name" },
+  { key: "folder", label: "{folder}", title: "The folder the source file came from - tells stems apart when every file is called other.m4a" },
   { key: "tag", label: "{tag}", title: "Detected key + tempo combined, e.g. Cm 120bpm" },
   { key: "key", label: "{key}", title: "Detected musical key alone, e.g. Cm" },
   { key: "tempo", label: "{tempo}", title: "Detected tempo alone, e.g. 120" },

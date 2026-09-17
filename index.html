@@ -50,6 +50,7 @@
       <button type="button" class="seg-btn" data-task-choice="stretch" title="Time-stretch and colour whole files. No cutting.">Stretch</button>
       <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
       <button type="button" class="seg-btn" data-task-choice="nice" title="Conform loops to a shared tempo and key, so unrelated samples play nice together.">Play nice</button>
+      <button type="button" class="seg-btn" data-task-choice="flip" title="Give one loop back to you wrong - automatic remixes of it, eight at a time.">Flip</button>
     </div>
 
     <div class="topbar-right">
@@ -163,7 +164,15 @@
           <span class="slider-unit">ms</span>
         </div>
       </div>
-      <p class="mod-note">Good Bits automatically analyses key and tempo for every source - there's nothing to opt into. Use the naming tokens above to decide whether that shows up in exported names.</p>
+      <label class="check">
+        <input id="detect-key-checkbox" type="checkbox" checked />
+        <span>Detect key</span>
+      </label>
+      <label class="check">
+        <input id="detect-tempo-checkbox" type="checkbox" checked />
+        <span>Detect tempo</span>
+      </label>
+      <p class="mod-note">Off skips that detector entirely, for every mode - no analysis attempted, and its {key}/{tempo}/{tag} naming tokens above quietly drop out. Turn off key detection for material with no meaningful key, like drum breaks. Tempo still drives bar-locked drum chop length and the stretch ratio, so turning it off without setting a tempo manually per file falls back the same way an unconfident detection already does.</p>
       <p id="essentia-status" class="essentia-status">Loading key &amp; tempo detection…</p>
     </section>
 
@@ -369,6 +378,13 @@
              BOTH are entirely unaffected by it. Shown/hidden via the `hidden` attribute the
              same way #stretch-workspace is, from updatePlayNiceVisibility() in app.js. -->
         <div id="play-nice-workspace" class="play-nice-workspace" hidden></div>
+
+        <!-- FLIP's own workspace: one loop in, a batch of automatic remixes out. Like PLAY NICE it
+             brings its own source zone, settings and export controls and so replaces the stage's
+             normal contents rather than sitting alongside them. Built by js/flip/controller.js,
+             which owns all of its own state; CHOP, STRETCH, BOTH and PLAY NICE are unaffected by
+             it. Shown/hidden from updateFlipVisibility() in app.js. -->
+        <div id="flip-workspace" class="flip-workspace" hidden></div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>

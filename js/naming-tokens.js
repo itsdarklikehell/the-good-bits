@@ -9,7 +9,9 @@
 // what keeps the two directions (string -> chips for display, chips -> string for storage/export)
 // in exact agreement, and it's simple enough to unit-test without a browser.
 //
-// Recognised tokens are name, tag, key, tempo, number - matched case-insensitively. {tag} is the
+// Recognised tokens are name, folder, tag, key, tempo, number - matched case-insensitively. {folder}
+// is the source file's own parent folder name, which is what tells two files apart when a batch is
+// full of stem exports that are all called "other.m4a" or "drums.m4a". {tag} is the
 // original combined "Cm 120bpm"-style key+tempo tag (still fully supported: existing saved patterns
 // using it, e.g. the legacy "{name} {tag} {number}" preset, keep working exactly as before). {key}
 // and {tempo} are the same detected values split into two independent tokens, so a pattern can use
@@ -18,9 +20,9 @@
 // as plain text: it was never a valid token before this editor existed, and turning it into one
 // would change what gets exported.
 
-export const NAMING_TOKENS = ["name", "tag", "key", "tempo", "number"];
+export const NAMING_TOKENS = ["name", "folder", "tag", "key", "tempo", "number"];
 
-const TOKEN_RE = /\{(name|tag|key|tempo|number)\}/gi;
+const TOKEN_RE = /\{(name|folder|tag|key|tempo|number)\}/gi;
 
 /**
  * Splits a pattern string into an ordered list of segments: {type:"token", key:"name"|"tag"|"number"}
@@ -54,7 +56,7 @@ export function isKnownToken(key) {
 }
 
 /**
- * Substitutes {name}/{tag}/{key}/{tempo}/{number} tokens (case-insensitively) in a typed naming
+ * Substitutes {name}/{folder}/{tag}/{key}/{tempo}/{number} tokens (case-insensitively) in a typed naming
  * pattern. A token missing from `tokens` (e.g. {key} when nothing was detected) resolves to "" -
  * same fallback for every token, so an unmatched token just quietly drops out rather than leaving a
  * literal "{key}" in the exported filename.
@@ -67,7 +69,7 @@ export function resolveNamePattern(template, tokens) {
 }
 
 /**
- * Resolves a FOLDER/base-name pattern - the same {name}/{tag}/{key}/{tempo} tokens a filename
+ * Resolves a FOLDER/base-name pattern - the same {name}/{folder}/{tag}/{key}/{tempo} tokens a filename
  * pattern uses, minus {number} (a source's own output folder has no per-chop number to add, unlike
  * buildChopFileName's filenames - see js/app.js's buildTaggedStem, the one caller). Falls back to
  * "{name}" for an empty/blank pattern, and collapses the run of whitespace a missing token can leave
