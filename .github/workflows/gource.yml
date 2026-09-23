@@ -47,10 +47,14 @@ jobs:
             -c:a aac -b:a 128k -movflags +faststart \
             ./gource.mp4
 
-      - name: Commit gource video
+      - name: Generate thumbnail
+        run: |
+          ffmpeg -y -ss 3 -i ./gource/gource.mp4 -frames:v 1 -q:v 2 gource/gource.png
+
+      - name: Commit gource video + thumbnail
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add -f gource.mp4
+          git add -f gource.mp4 gource/gource.png
           git diff --staged --quiet || git commit -m "ci: add gource visualization (automated)"
           git push
