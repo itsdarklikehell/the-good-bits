@@ -9,7 +9,7 @@ jobs:
   gource:
     runs-on: ubuntu-latest
     permissions:
-      contents: read
+      contents: write
       actions: write
 
     steps:
@@ -34,8 +34,18 @@ jobs:
             --stop-at-end
             --hide mouse,progress
 
-      - name: Upload video
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
-        with:
-          name: the-good-bits-gource
-          path: ./gource/gource.mp4
+      - name: Upscale + re-encode
+        run: |
+          ffmpeg -y -i ./gource/gource.mp4 \
+            -c:v libx264 -crf 19 -level 3.1 -preset slow -tune film \
+            -filter:v "scale=-2:720" -sws_flags lanczos \
+            -c:a aac -b:a 128k -movflags +faststart \
+            ./gource.mp4
+
+      - name: Commit gource video
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f gource.mp4
+          git diff --staged --quiet || git commit -m "ci: add gource visualization (automated)"
+          git push
