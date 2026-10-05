@@ -24,6 +24,23 @@ export function analyzeFrame(chan, pos, fftSize, window, half) {
 }
 
 /**
+ * Analysis/synthesis hop sizes for an STFT stretch at `ratio`. The classic scheme fixes the analysis
+ * hop at fftSize/hopDivisor and scales the synthesis hop by the ratio - fine for modest stretches,
+ * but once ratio outgrows the overlap the synthesis frames stop touching and the output turns into
+ * windowed blips separated by silence (Transient at 8x was ~50% silence, Infinite at 40x ~80%). So
+ * the synthesis hop is capped at half a frame, and past that point the ANALYSIS hop shrinks instead
+ * (fractionally - callers floor m*Ha to an integer read position, which can repeat a frame at huge
+ * ratios). Below the cap this returns exactly the old integer hops, so existing renders are unchanged.
+ */
+export function planHops(fftSize, hopDivisor, ratio) {
+  const Ha = Math.max(1, Math.round(fftSize / hopDivisor));
+  const Hs = Math.max(1, Math.round(Ha * ratio));
+  const maxHs = Math.floor(fftSize / 2);
+  if (Hs <= maxHs) return { Ha, Hs };
+  return { Ha: maxHs / ratio, Hs: maxHs };
+}
+
+/**
  * Divides an overlap-add accumulator by its weight accumulator, the last step of every STFT-based
  * engine here. The naive version (divide by weight, or by 0 below a tiny epsilon) blows up right at
  * the start/end of the output: those samples are covered by only one sparsely-overlapping frame, so

@@ -67,3 +67,29 @@ export function mapPreviewPosition(fromPositionSec, fromDurationSec, toDurationS
   const proportion = Math.max(0, Math.min(1, fromPositionSec / fromDurationSec));
   return proportion * toDurationSec;
 }
+
+// Stretch-amount control. The range runs from 5% to 100000% (1000x), so a linear slider would spend
+// nearly all its travel on absurd lengths and leave 50-200% crammed into a pixel. The slider is a
+// log scale over RATIO_SLIDER_STEPS positions instead; the number box beside it takes the % as typed.
+export const RATIO_PCT_MIN = 5;
+export const RATIO_PCT_MAX = 100000;
+export const RATIO_SLIDER_STEPS = 1000;
+
+/** Clamp a typed/saved % into range and round it to a readable value - finer steps at small amounts. */
+export function tidyRatioPct(pct) {
+  const v = Math.min(RATIO_PCT_MAX, Math.max(RATIO_PCT_MIN, Number(pct) || 100));
+  const step = v >= 10000 ? 100 : v >= 1000 ? 10 : 1;
+  return Math.max(RATIO_PCT_MIN, Math.round(v / step) * step);
+}
+
+/** Slider position (0..RATIO_SLIDER_STEPS) -> stretch %. */
+export function sliderToRatioPct(pos) {
+  const t = Math.min(1, Math.max(0, Number(pos) / RATIO_SLIDER_STEPS));
+  return tidyRatioPct(RATIO_PCT_MIN * Math.pow(RATIO_PCT_MAX / RATIO_PCT_MIN, t));
+}
+
+/** Stretch % -> slider position. */
+export function ratioPctToSlider(pct) {
+  const v = Math.min(RATIO_PCT_MAX, Math.max(RATIO_PCT_MIN, Number(pct) || 100));
+  return Math.round((Math.log(v / RATIO_PCT_MIN) / Math.log(RATIO_PCT_MAX / RATIO_PCT_MIN)) * RATIO_SLIDER_STEPS);
+}

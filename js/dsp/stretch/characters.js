@@ -28,6 +28,8 @@ export const MACROS = {
   variation: { label: "Variation", hint: "How unstable the grains are - position, pitch, reversal.", default: 50 },
   smear: { label: "Smear", hint: "How far the spectral texture drifts from the original.", default: 50 },
   roughness: { label: "Roughness", hint: "How hard the digital artifacts bite.", default: 50 },
+  cycle: { label: "Cycle length", hint: "Shorter = buzzy, pitched stutter; longer = audible ghosted repeats.", default: 50 },
+  crossfade: { label: "Crossfade", hint: "Lower = hard, clicky joins; higher = smoother, more phasey.", default: 50 },
 };
 
 function macroFactor(macroValues, key) {
@@ -72,7 +74,17 @@ function applyOldDigitalMacros(params, macroValues) {
   return out;
 }
 
-const MACRO_APPLIERS = { granular: applyGranularMacros, spectral: applySpectralMacros, oldDigital: applyOldDigitalMacros };
+function applyCyclicMacros(params, macroValues) {
+  const out = { ...params };
+  // Cycle length is exponential - each 25 points halves or doubles it, so 0-100 spans a quarter to
+  // four times the character's own cycle, which is the useful range from buzz to obvious repeats.
+  const cycleV = macroValues && typeof macroValues.cycle === "number" ? macroValues.cycle : MACROS.cycle.default;
+  out.cycleMs = Math.max(3, params.cycleMs * Math.pow(2, (cycleV - 50) / 25));
+  out.crossfade = Math.max(0, Math.min(0.5, params.crossfade * macroFactor(macroValues, "crossfade")));
+  return out;
+}
+
+const MACRO_APPLIERS = { granular: applyGranularMacros, spectral: applySpectralMacros, oldDigital: applyOldDigitalMacros, cyclic: applyCyclicMacros };
 
 /** Character registry. `params` are the engine's own defaults; `macros` (if present) name which macro sliders apply and which family's mapping resolves them. */
 export const CHARACTERS = {
@@ -184,6 +196,24 @@ export const CHARACTERS = {
     macros: ["roughness"],
     macroFamily: "oldDigital",
     usesSeed: true,
+  },
+  cyclic: {
+    label: "Cyclic",
+    group: "oldDigital",
+    engine: "cyclic",
+    description: "Akai S-series style cyclic stretch: fixed-length cycles crossfaded end to end with no splice search. Ghosted, doubled, buzzing - the 90s jungle vocal and break stretch.",
+    params: { cycleMs: 60, crossfade: 0.25, bitDepth: null },
+    macros: ["cycle", "crossfade"],
+    macroFamily: "cyclic",
+  },
+  cyclic12: {
+    label: "Cyclic 12-bit",
+    group: "oldDigital",
+    engine: "cyclic",
+    description: "Shorter cycles, harder joins and 12-bit grit, in the spirit of the earlier 12-bit Akais.",
+    params: { cycleMs: 35, crossfade: 0.12, bitDepth: 12 },
+    macros: ["cycle", "crossfade"],
+    macroFamily: "cyclic",
   },
 
   // --- GRANULAR -------------------------------------------------------------
@@ -307,7 +337,6 @@ export const CHARACTERS = {
     params: { fftMs: 90, overlap: 4, holdMs: 250 },
     macros: ["smear"],
     macroFamily: "spectral",
-    maxRatio: 30,
   },
   drone: {
     label: "Drone",
@@ -317,7 +346,6 @@ export const CHARACTERS = {
     params: { fftMs: 140, overlap: 4, holdMs: 900 },
     macros: ["smear"],
     macroFamily: "spectral",
-    maxRatio: 50,
   },
   spectral: {
     label: "Spectral",
@@ -328,7 +356,6 @@ export const CHARACTERS = {
     macros: ["smear"],
     macroFamily: "spectral",
     usesSeed: true,
-    maxRatio: 40,
   },
   infinite: {
     label: "Infinite",
@@ -339,7 +366,6 @@ export const CHARACTERS = {
     macros: ["smear"],
     macroFamily: "spectral",
     usesSeed: true,
-    maxRatio: 60,
   },
 
   // --- EXPERIMENTAL -----------------------------------------------------

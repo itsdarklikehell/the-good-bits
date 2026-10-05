@@ -9,20 +9,24 @@
 // back. See runHeavyDsp() in app.js for the calling side, including the same-thread fallback used
 // if a worker can't be created at all (very old browsers, or a `file://` load).
 //
-// Two jobs, sharing one worker rather than spawning a second: "processRegions" is CHOP/
-// STRETCH's export path (above), and "conformLoop" is PLAY NICE's - time-stretch onto a
+// Three jobs, sharing one worker rather than spawning more: "processRegions" is CHOP/
+// STRETCH's export path (above), "conformLoop" is PLAY NICE's - time-stretch onto a
 // target tempo plus an independent pitch shift onto a target key, from a plan the main
-// thread already calculated. Neither knows anything about the other; they share this file
-// because they share the requirement of not running on the main thread.
+// thread already calculated - and "stretchFx" renders one STRETCH FX recipe (js/stretch-fx/
+// render.js) from a fragment the main thread already cut. None knows anything about the
+// others; they share this file because they share the requirement of not running on the
+// main thread.
 import { stretchChannels } from "./timestretch.js";
 import { applyLofiChain, deriveRegionSeed } from "./outputstage.js";
 import { applyFades } from "./dsp.js";
 import { encodeWav } from "./audio-codec.js";
 import { renderConform } from "./play-nice/render.js";
+import { renderFx } from "./stretch-fx/render.js";
 
 self.onmessage = (ev) => {
   const msg = ev.data;
   if (msg.type === "conformLoop") return handleConformLoop(msg);
+  if (msg.type === "stretchFx") return handleStretchFx(msg);
   if (msg.type !== "processRegions") return;
   const { requestId, sampleRate, bitDepth, fadeInSamples, fadeOutSamples, stretchRatio, character, macroValues, seed, lofi, regions } = msg;
 
@@ -79,4 +83,19 @@ function serializeAlignment(alignment) {
   const one = (a) =>
     a ? { offsetMs: a.offsetMs, applied: a.applied, found: a.found, converged: a.converged, residualMs: a.residualMs, confident: a.confident, confidence: a.confidence } : null;
   return { source: one(alignment.source), output: one(alignment.output) };
+}
+
+/**
+ * STRETCH FX: render one recipe. Hands back raw channels rather than a WAV blob - the main thread
+ * needs the samples to audition, to draw, and to drop into the Snap Back context; it encodes only
+ * when something is exported.
+ */
+function handleStretchFx(msg) {
+  const { requestId, channels, sampleRate, recipe } = msg;
+  try {
+    const out = renderFx({ channels, sampleRate, recipe });
+    self.postMessage({ type: "stretchFxResult", requestId, channels: out.channels }, out.channels.map((ch) => ch.buffer));
+  } catch (err) {
+    self.postMessage({ type: "stretchFxError", requestId, message: (err && err.message) || String(err) });
+  }
 }

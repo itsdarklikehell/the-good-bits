@@ -25,7 +25,7 @@ import { toMono } from "../../dsp.js";
 import { ifft, nextPow2, wrapPhase } from "./fft.js";
 import { getWindow } from "./windows.js";
 import { makeRng } from "./rng.js";
-import { analyzeFrame, synthesizeSpectrum, normalizeOverlapAdd } from "./stft.js";
+import { analyzeFrame, synthesizeSpectrum, normalizeOverlapAdd, planHops } from "./stft.js";
 
 /** Local maxima of `mag`, above a small fraction of the frame's own peak, used for identity phase locking. */
 function findPeaks(mag, half) {
@@ -95,8 +95,12 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
   const fftSize = nextPow2(Math.max(64, Math.round(((p.fftMs ?? 46) / 1000) * sampleRate)));
   const half = fftSize / 2;
   const hopDivisor = Math.max(2, p.overlap ?? 4);
-  const Ha = Math.max(1, Math.round(fftSize / hopDivisor));
-  const Hs = Math.max(1, Math.round(Ha * ratio));
+  // Ha may come back fractional for big ratios (see planHops) - frame m reads at floor(m * Ha).
+  const { Ha, Hs } = planHops(fftSize, hopDivisor, ratio);
+  // Transient detection always runs on the nominal integer hop grid, so its cost and memory don't
+  // balloon when Ha shrinks for a huge ratio - each synthesis frame looks up the grid cell it reads from.
+  const gridHop = Math.max(1, Math.round(fftSize / hopDivisor));
+  const onGrid = Ha === gridHop;
   const window = getWindow("hann", fftSize);
   const phaseLocking = !!p.phaseLocking;
   const phaseRandomize = Math.max(0, Math.min(1, p.phaseRandomize ?? 0));
@@ -107,12 +111,10 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
   const inputLen = reference.length;
   const outLen = Math.max(fftSize, Math.round(inputLen * ratio));
   const numFrames = Math.max(1, Math.ceil(inputLen / Ha) + 1);
+  const numGridFrames = Math.max(1, Math.ceil(inputLen / gridHop) + 1);
 
-  const referenceFrames = transientReset ? analyzeReferenceFrames(reference, fftSize, Ha, window, half, numFrames) : null;
-  const transientFlags = transientReset ? transientFlagsFromFrames(referenceFrames, half, numFrames, transientSensitivity) : null;
-
-  const expectedAdvance = new Float64Array(half + 1);
-  for (let k = 0; k <= half; k++) expectedAdvance[k] = (2 * Math.PI * k * Ha) / fftSize;
+  const referenceFrames = transientReset ? analyzeReferenceFrames(reference, fftSize, gridHop, window, half, numGridFrames) : null;
+  const transientFlags = transientReset ? transientFlagsFromFrames(referenceFrames, half, numGridFrames, transientSensitivity) : null;
 
   return channels.map((chan) => {
     // Reseeded identically per channel: the random phase sequence lines up bin-for-bin and
@@ -123,20 +125,30 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
     const weight = new Float64Array(outLen + fftSize);
     const outPhase = new Float64Array(half + 1);
     let prevAnalysisPhase = null;
+    let prevAnalysisPos = 0;
+    let prevSynthesisPos = 0;
+    let prevGrid = -1;
     let havePrev = false;
+    // Per-bin instantaneous frequency, kept across frames so a repeated read position (possible when
+    // Ha < 1 at huge ratios) keeps advancing phase at the last measured rate instead of stalling.
+    const trueFreq = new Float64Array(half + 1);
 
     const synRe = new Float64Array(fftSize);
     const synIm = new Float64Array(fftSize);
 
     for (let m = 0; m < numFrames; m++) {
-      const analysisPos = m * Ha;
+      const analysisPos = Math.floor(m * Ha);
       const synthesisPos = m * Hs;
       if (synthesisPos > outLen + fftSize) break;
 
-      // Mono input: `chan` IS `reference` (same array), so the transient-detection pass above
-      // already analysed this exact frame - reuse it instead of running an identical FFT again.
-      const { mag, phase } = chan === reference && referenceFrames ? referenceFrames[m] : analyzeFrame(chan, analysisPos, fftSize, window, half);
-      const isTransient = transientFlags ? !!transientFlags[m] : false;
+      // Mono input on the nominal grid: `chan` IS `reference` (same array), so the transient-detection
+      // pass above already analysed this exact frame - reuse it instead of running an identical FFT again.
+      const { mag, phase } = onGrid && chan === reference && referenceFrames ? referenceFrames[m] : analyzeFrame(chan, analysisPos, fftSize, window, half);
+      // Only the first frame to land in a flagged grid cell resets - at huge ratios dozens of frames
+      // read from the same cell, and resetting all of them would just freeze the phase there.
+      const grid = Math.floor(analysisPos / gridHop);
+      const isTransient = transientFlags && grid !== prevGrid ? !!transientFlags[grid] : false;
+      prevGrid = grid;
 
       if (!havePrev) {
         for (let k = 0; k <= half; k++) outPhase[k] = phase[k];
@@ -144,10 +156,15 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
       } else if (isTransient) {
         for (let k = 0; k <= half; k++) outPhase[k] = phase[k];
       } else {
+        const aStep = analysisPos - prevAnalysisPos;
+        const sStep = synthesisPos - prevSynthesisPos;
         for (let k = 0; k <= half; k++) {
-          const delta = wrapPhase(phase[k] - prevAnalysisPhase[k] - expectedAdvance[k]);
-          const trueFreq = (2 * Math.PI * k) / fftSize + delta / Ha;
-          outPhase[k] += trueFreq * Hs;
+          if (aStep > 0) {
+            const expected = (2 * Math.PI * k * aStep) / fftSize;
+            const delta = wrapPhase(phase[k] - prevAnalysisPhase[k] - expected);
+            trueFreq[k] = (2 * Math.PI * k) / fftSize + delta / aStep;
+          }
+          outPhase[k] += trueFreq[k] * sStep;
         }
       }
 
@@ -177,6 +194,8 @@ export function stretchPhaseVocoder(channels, sampleRate, ratio, params, seed) {
       }
 
       prevAnalysisPhase = phase;
+      prevAnalysisPos = analysisPos;
+      prevSynthesisPos = synthesisPos;
     }
 
     return normalizeOverlapAdd(out, weight, outLen);

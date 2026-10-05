@@ -15,6 +15,7 @@
 // silently kill any audio currently playing. Only an actual character switch, file switch, mode
 // switch, or a fresh Process result rebuilds the parts of the DOM that need it.
 import { characterGroups, MACROS } from "./dsp/stretch/characters.js";
+import { RATIO_PCT_MIN, RATIO_PCT_MAX, RATIO_SLIDER_STEPS, sliderToRatioPct, ratioPctToSlider, tidyRatioPct } from "./dsp/stretch/workspace-state.js";
 import { mapPreviewPosition } from "./dsp/stretch/workspace-state.js";
 import { createPreviewWaveform } from "./preview-waveform.js";
 
@@ -216,14 +217,20 @@ export function createStretchWorkspace({
     onTargetBpmChange(v);
   });
 
-  const ratioField = makeSliderField("Stretch amount", { min: 25, max: 400, step: 1, unit: "%" });
+  // Log-scaled slider (see sliderToRatioPct) - the number box holds the actual %.
+  const ratioField = makeSliderField("Stretch amount", { min: 0, max: RATIO_SLIDER_STEPS, step: 1, unit: "%" });
+  ratioField.number.min = String(RATIO_PCT_MIN);
+  ratioField.number.max = String(RATIO_PCT_MAX);
+  ratioField.number.classList.add("slider-number-wide");
   ratioField.slider.addEventListener("input", () => {
-    ratioField.number.value = ratioField.slider.value;
-    onRatioChange(Number(ratioField.slider.value));
+    const v = sliderToRatioPct(ratioField.slider.value);
+    ratioField.number.value = String(v);
+    onRatioChange(v);
   });
   ratioField.number.addEventListener("change", () => {
-    let v = Math.min(400, Math.max(25, Math.round(Number(ratioField.number.value) || 100)));
-    ratioField.number.value = ratioField.slider.value = String(v);
+    const v = tidyRatioPct(ratioField.number.value);
+    ratioField.number.value = String(v);
+    ratioField.slider.value = String(ratioPctToSlider(v));
     onRatioChange(v);
   });
 
@@ -242,7 +249,11 @@ export function createStretchWorkspace({
     targetBpmField.field.hidden = mode !== "target-tempo";
     ratioField.field.hidden = mode !== "fixed-ratio";
     if (document.activeElement !== targetBpmField.number) targetBpmField.slider.value = targetBpmField.number.value = String(targetBpm);
-    if (document.activeElement !== ratioField.number) ratioField.slider.value = ratioField.number.value = String(ratioPct);
+    if (document.activeElement !== ratioField.number) {
+      ratioField.number.value = String(ratioPct);
+      // Don't yank the slider mid-drag: its position already maps to this % (give or take rounding).
+      if (document.activeElement !== ratioField.slider) ratioField.slider.value = String(ratioPctToSlider(ratioPct));
+    }
 
     currentSourceBpm = sourceBpm;
     if (document.activeElement !== sourceInput) refreshSourceInput();

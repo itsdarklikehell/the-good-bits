@@ -15,6 +15,7 @@ import { stretchRepeat } from "./repeat.js";
 import { stretchSpectralFreeze } from "./spectral-freeze.js";
 import { stretchPaulstretch } from "./paulstretch.js";
 import { stretchVarispeed } from "./varispeed.js";
+import { stretchCyclic } from "./cyclic.js";
 
 export * from "./characters.js";
 
@@ -26,9 +27,15 @@ const ENGINE_FNS = {
   spectralFreeze: (channels, sr, ratio, params) => stretchSpectralFreeze(channels, sr, ratio, params),
   paulstretch: (channels, sr, ratio, params, seed) => stretchPaulstretch(channels, sr, ratio, params, seed),
   varispeed: (channels, sr, ratio) => stretchVarispeed(channels, ratio),
+  cyclic: (channels, sr, ratio, params) => stretchCyclic(channels, sr, ratio, params),
 };
 
-export const DEFAULT_MAX_RATIO = 8;
+/** Ceiling for every character (a character can still set a lower `maxRatio` of its own). 1000x is
+ * past anything musical on purpose - it's there for PaulStretch-style drones out of a single hit. */
+export const DEFAULT_MAX_RATIO = 1000;
+/** Whatever the ratio, output never runs past this long - 1000x of a two-minute loop would be ~33
+ * hours of audio, which is gigabytes of samples and would take the tab down long before it finished. */
+export const MAX_OUTPUT_SECONDS = 600;
 /** Floor the dispatcher clamps to. Exported so a caller can check whether a ratio it wants
  * is actually reachable, rather than having it silently clamped underneath them. */
 export const MIN_RATIO = 0.05;
@@ -41,7 +48,9 @@ export const MIN_RATIO = 0.05;
  */
 export function stretchChannels(channels, sampleRate, ratio, characterKey, options = {}) {
   const character = resolveCharacter(characterKey);
-  const maxRatio = character.maxRatio || DEFAULT_MAX_RATIO;
+  const inputLen = channels[0] ? channels[0].length : 0;
+  const lengthCap = inputLen > 0 ? Math.max(1, (MAX_OUTPUT_SECONDS * sampleRate) / inputLen) : Infinity;
+  const maxRatio = Math.min(character.maxRatio || DEFAULT_MAX_RATIO, lengthCap);
   const clamped = Math.max(MIN_RATIO, Math.min(maxRatio, ratio || 1));
   if (Math.abs(clamped - 1) < 1e-6) return channels.map((ch) => Float32Array.from(ch));
 

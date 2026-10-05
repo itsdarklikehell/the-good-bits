@@ -15,7 +15,7 @@
 import { toMono } from "../../dsp.js";
 import { ifft, nextPow2, wrapPhase } from "./fft.js";
 import { getWindow } from "./windows.js";
-import { analyzeFrame, synthesizeSpectrum, normalizeOverlapAdd } from "./stft.js";
+import { analyzeFrame, synthesizeSpectrum, normalizeOverlapAdd, planHops } from "./stft.js";
 
 function clamp01(x) {
   return Math.max(0, Math.min(1, x));
@@ -29,8 +29,11 @@ export function stretchSpectralFreeze(channels, sampleRate, ratio, params) {
   const fftSize = nextPow2(Math.max(256, Math.round(((p.fftMs ?? 90) / 1000) * sampleRate)));
   const half = fftSize / 2;
   const hopDivisor = Math.max(2, p.overlap ?? 4);
+  // Frames are synthesised from captured spectra, not read at m * Ha, so only Hs matters here - but
+  // it still needs planHops' cap, or big ratios space the frames out into silence. Ha stays the
+  // integer grid hop for the instantaneous-frequency estimate below.
   const Ha = Math.max(1, Math.round(fftSize / hopDivisor));
-  const Hs = Math.max(1, Math.round(Ha * ratio));
+  const { Hs } = planHops(fftSize, hopDivisor, ratio);
   const holdMs = Math.max(20, p.holdMs ?? 300);
   const holdHops = Math.max(2, Math.round((holdMs / 1000) * sampleRate / Hs));
   const crossfadeHops = Math.max(1, Math.round(holdHops * 0.3));

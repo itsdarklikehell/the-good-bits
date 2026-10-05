@@ -23,11 +23,14 @@ import {
   equalSliceRegions,
 } from "./dsp.js";
 import { stretchChannels, ratioForTargetTempo, resolveCharacter, characterGroups, MACROS } from "./timestretch.js";
-import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed } from "./dsp/stretch/workspace-state.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, sliderToRatioPct, ratioPctToSlider, tidyRatioPct } from "./dsp/stretch/workspace-state.js";
 import { createStretchWorkspace } from "./stretch-workspace.js";
 import { resolveVariationSet, variationFileName } from "./variation-export.js";
 import { createPlayNice } from "./play-nice/controller.js";
 import { createFlip } from "./flip/controller.js";
+import { createStretchFx } from "./stretch-fx/controller.js";
+import { renderFx as renderStretchFxPure } from "./stretch-fx/render.js";
+import { createLab } from "./lab/controller.js";
 import { renderConform } from "./play-nice/render.js";
 import { createNamingPatternEditor } from "./naming-pattern-editor.js";
 import { resolveNamePattern, resolveFolderName } from "./naming-tokens.js";
@@ -487,6 +490,8 @@ const timestretchPitchNote = $("#timestretch-pitch-note");
 const stretchWorkspaceEl = $("#stretch-workspace");
 const playNiceWorkspaceEl = $("#play-nice-workspace");
 const flipWorkspaceEl = $("#flip-workspace");
+const stretchFxWorkspaceEl = $("#stretch-fx-workspace");
+const labWorkspaceEl = $("#lab-workspace");
 const detectionParamsPanel = $("#detection-params-panel");
 const outputstageEnableCheckbox = $("#outputstage-enable-checkbox");
 const outputstageOptions = $("#outputstage-options");
@@ -1106,6 +1111,58 @@ const flip = createFlip({
   },
 });
 
+// ---------------------------------------------------------------------------
+// STRETCH FX
+//
+// One break in, a bank of aggressively stretched fragments out - see js/stretch-fx/controller.js.
+// Same arrangement as FLIP: its own source, settings, results and export destination, built from
+// the shared decoder, tempo bridge, AudioContext, log and File System Access helpers. The one thing
+// it adds here is renderFx, which runs each result through the shared heavy-dsp worker (a stretch at
+// 800% is real work, unlike FLIP's array copying) with the usual main-thread fallback.
+// ---------------------------------------------------------------------------
+
+const stretchFx = createStretchFx({
+  container: stretchFxWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  analyze: analyzeKeyAndTempo,
+  renderFx: runStretchFxHeavy,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+  io: {
+    supportsFSA: FSA_SUPPORTED && FSA_FILE_PICKER_SUPPORTED,
+    pickFiles: (opts) => pickFilesFSA(opts),
+    pickFolder: () => pickFolderFSA(),
+    ensurePermission: ensureReadWritePermission,
+    writeFile: writeFileFSA,
+    ZipBatch,
+  },
+});
+
+// ---------------------------------------------------------------------------
+// LAB
+//
+// An evolutionary search over low-level DSP primitives, not a fixed effects rack - see
+// js/lab/controller.js. Same arrangement as FLIP and STRETCH FX: its own source, its own state,
+// nothing shared with the CHOP/STRETCH/BOTH batch queue. Deliberately lighter on deps than STRETCH FX
+// - no tempo/key analysis, no File System Access export folder - a render is small and offline
+// enough to run on the main thread with a yield between search attempts (see controller.js).
+// ---------------------------------------------------------------------------
+
+const lab = createLab({
+  container: labWorkspaceEl,
+  chromeContainer: document.querySelector(".app"),
+  decodeFile,
+  getAudioContext,
+  color: themeColor,
+  log,
+  logWarn,
+  logSuccess,
+});
+
 let stretchActiveKey = null; // analysisKey() of the file shown in the workspace right now
 const stretchFileOrder = []; // [{key, folder, fileInfo}], rebuilt at the start of every stretch-task batch run
 
@@ -1320,6 +1377,20 @@ function updateFlipVisibility() {
   flip.setActive(active);
 }
 
+/** STRETCH FX's workspace replaces the stage exactly like FLIP's - see updateFlipVisibility(). */
+function updateStretchFxVisibility() {
+  const active = task === "sfx";
+  stretchFxWorkspaceEl.hidden = !active;
+  stretchFx.setActive(active);
+}
+
+/** LAB's workspace replaces the stage exactly like FLIP's - see updateFlipVisibility(). */
+function updateLabVisibility() {
+  const active = task === "lab";
+  labWorkspaceEl.hidden = !active;
+  lab.setActive(active);
+}
+
 // ---------------------------------------------------------------------------
 // Automatic Stretch preview processing.
 //
@@ -1443,7 +1514,17 @@ bindSliderNumber(timestretchTargetBpmInput, timestretchTargetBpmNumber, (v) => {
   timestretchSettings.targetBpm = v;
   saveSettings();
 });
-bindSliderNumber(timestretchRatioInput, timestretchRatioNumber, (v) => {
+// Not bindSliderNumber: the slider is a log scale (see sliderToRatioPct), so it and the % box don't share units.
+timestretchRatioInput.addEventListener("input", () => {
+  const v = sliderToRatioPct(timestretchRatioInput.value);
+  timestretchRatioNumber.value = String(v);
+  timestretchSettings.ratio = v / 100;
+  saveSettings();
+});
+timestretchRatioNumber.addEventListener("change", () => {
+  const v = tidyRatioPct(timestretchRatioNumber.value);
+  timestretchRatioNumber.value = String(v);
+  timestretchRatioInput.value = String(ratioPctToSlider(v));
   timestretchSettings.ratio = v / 100;
   saveSettings();
 });
@@ -1668,11 +1749,11 @@ function loadSettings() {
 // ---------------------------------------------------------------------------
 
 const TASK_STORAGE_KEY = "good-bits-task-v1";
-// "nice" is PLAY NICE and "flip" is FLIP - two tasks that share the shell (topbar, stage, log) but
-// none of the batch pipeline: each keeps its own queue/source, settings and export destination
-// inside js/play-nice/controller.js and js/flip/controller.js respectively, so nothing about
-// CHOP/STRETCH/BOTH changes when either is selected.
-const TASKS = ["chop", "stretch", "both", "nice", "flip"];
+// "nice" is PLAY NICE, "flip" is FLIP and "sfx" is STRETCH FX - tasks that share the shell (topbar,
+// stage, log) but none of the batch pipeline: each keeps its own queue/source, settings and export
+// destination inside js/play-nice/, js/flip/ and js/stretch-fx/ respectively, so nothing about
+// CHOP/STRETCH/BOTH changes when any of them is selected.
+const TASKS = ["chop", "stretch", "both", "nice", "flip", "sfx", "lab"];
 let task = "chop";
 
 function applyTask(next, { persist = true } = {}) {
@@ -1688,8 +1769,12 @@ function applyTask(next, { persist = true } = {}) {
   updateStretchWorkspaceVisibility();
   updatePlayNiceVisibility();
   updateFlipVisibility();
+  updateStretchFxVisibility();
+  updateLabVisibility();
   if (task !== "nice") playNice.stopAllPlayback();
   if (task !== "flip") flip.stopAllPlayback();
+  if (task !== "sfx") stretchFx.stopAllPlayback();
+  if (task !== "lab") lab.stopAllPlayback();
   if (task === "stretch") {
     renderStretchCharacterBrowser();
     renderStretchFileStrip();
@@ -1807,7 +1892,8 @@ function applySettings(saved) {
     updateStretchTaskVisibility();
     timestretchModeSelect.value = timestretchSettings.mode;
     timestretchTargetBpmInput.value = timestretchTargetBpmNumber.value = String(timestretchSettings.targetBpm);
-    timestretchRatioInput.value = timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
+    timestretchRatioNumber.value = String(Math.round(timestretchSettings.ratio * 100));
+    timestretchRatioInput.value = String(ratioPctToSlider(timestretchSettings.ratio * 100));
     timestretchCharacterSelect.value = timestretchSettings.character;
     // A character id this version no longer recognises (stale save, hand-edited localStorage) leaves
     // the <select> with nothing chosen - fall back to "clean" in both the setting and the control
@@ -2427,7 +2513,7 @@ clearFoldersBtn.addEventListener("click", clearSourceQueue);
  * and "start a new session" should never quietly mean "lose how I like this set up".
  */
 async function newSession() {
-  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent();
+  const hasWork = processing || sourceFolders.length > 0 || playNice.hasContent() || flip.hasContent() || stretchFx.hasContent() || lab.hasContent();
   if (hasWork) {
     const { confirmed } = await showConfirmDialog({
       title: "Start a new session?",
@@ -2450,9 +2536,11 @@ async function newSession() {
   stopAllFileEditorPlayback();
   mountedFileEditors.clear();
   stretchWorkspace.stopAllPlayback();
-  // PLAY NICE and FLIP keep their own sources, so clearSourceQueue() below doesn't reach either.
+  // PLAY NICE, FLIP and STRETCH FX keep their own sources, so clearSourceQueue() below doesn't reach them.
   playNice.reset();
   flip.reset();
+  stretchFx.reset();
+  lab.reset();
 
   clearSourceQueue();
   resultsPanel.innerHTML = "";
@@ -2544,6 +2632,7 @@ function getHeavyDspWorker() {
       heavyDspPending.delete(requestId);
       if (type === "processRegionsResult") pending.resolve(ev.data.results);
       else if (type === "conformLoopResult") pending.resolve({ blob: ev.data.blob, seconds: ev.data.seconds, alignment: ev.data.alignment || null });
+      else if (type === "stretchFxResult") pending.resolve({ channels: ev.data.channels });
       else pending.reject(new Error(ev.data.message || "worker error"));
     });
     heavyDspWorker.addEventListener("error", (ev) => {
@@ -2677,6 +2766,47 @@ async function runConformHeavy({ channels, sampleRate, bitDepth, plan, seed, fad
   const alignment = rendered.alignment || null;
   applyFades(rendered, fadeInSamples || 0, fadeOutSamples || 0);
   return { blob: encodeWav(rendered, sampleRate, bitDepth), seconds: rendered[0].length / sampleRate, alignment };
+}
+
+/**
+ * STRETCH FX's render path: one recipe + the fragment it was cut from -> rendered channels, on the
+ * worker where possible. A sibling of runConformHeavy() for the same reasons that one is a sibling of
+ * processRegionsHeavy(). The fragment is the caller's own freshly-sliced copy (sliceFragment), so
+ * it's transferred rather than copied again; the fallback runs the identical pure function.
+ */
+async function runStretchFxHeavy({ channels, sampleRate, recipe }) {
+  const worker = getHeavyDspWorker();
+  if (worker) {
+    const timeoutMs = HEAVY_DSP_TIMEOUT_BASE_MS + HEAVY_DSP_TIMEOUT_PER_REGION_MS;
+    try {
+      return await new Promise((resolve, reject) => {
+        const requestId = ++heavyDspRequestId;
+        const timer = setTimeout(() => {
+          heavyDspPending.delete(requestId);
+          reject(new Error(`heavy-dsp-worker did not respond within ${Math.round(timeoutMs / 1000)}s - it may be stuck`));
+        }, timeoutMs);
+        heavyDspPending.set(requestId, {
+          resolve: (v) => {
+            clearTimeout(timer);
+            resolve(v);
+          },
+          reject: (e) => {
+            clearTimeout(timer);
+            reject(e);
+          },
+        });
+        worker.postMessage({ type: "stretchFx", requestId, channels, sampleRate, recipe }, channels.map((ch) => ch.buffer));
+      });
+    } catch (err) {
+      // The fragment was transferred, so it can't be reused for a retry here - fail this one result
+      // (the card says so and MUTATE re-renders from the source) and let the rest of the session
+      // fall back to the main thread, exactly as the other two heavy paths do.
+      console.error("heavy-dsp-worker failed during a STRETCH FX render, falling back to the main thread:", err);
+      terminateHeavyDspWorker();
+      throw err;
+    }
+  }
+  return renderStretchFxPure({ channels, sampleRate, recipe });
 }
 
 /**
@@ -3958,8 +4088,40 @@ function renderFileResult(state) {
     g.append(...els);
     return g;
   };
+  // Manual tempo for this source (drums only) - analysis proposes, the user overrides. See
+  // tempoOverrides near the top of this file; the raw detection is never touched.
+  const tempoInput = document.createElement("input");
+  tempoInput.type = "number";
+  tempoInput.min = "1";
+  tempoInput.step = "any";
+  tempoInput.className = "rechop-count-input rechop-tempo-input";
+  tempoInput.placeholder = "BPM";
+  tempoInput.title = "Tempo this break is chopped at. Type a value to override the detected tempo; the chops are re-cut by bars at the new tempo.";
+  tempoInput.setAttribute("aria-label", "Source tempo in BPM");
+  const tempoMakeBtn = (text, title) => {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "btn btn--ghost btn--small";
+    btn.textContent = text;
+    btn.title = title;
+    return btn;
+  };
+  const tempoHalfBtn = tempoMakeBtn("½", "Halve the tempo (fixes a detection that came out double-time).");
+  const tempoDoubleBtn = tempoMakeBtn("×2", "Double the tempo (fixes a detection that came out half-time).");
+  const tempoResetBtn = tempoMakeBtn("Detected", "Drop the manual tempo and go back to the detected one.");
+  const tempoLabel = document.createElement("span");
+  tempoLabel.className = "result-rechop-title";
+  tempoLabel.textContent = "BPM";
+  const refreshTempoControls = () => {
+    const bpm = state.editContext ? state.editContext.effectiveBpm : null;
+    tempoInput.value = bpm ? String(Math.round(bpm * 100) / 100) : "";
+    tempoResetBtn.disabled = !(state.analysisKey && tempoOverrides.has(state.analysisKey));
+  };
+  refreshTempoControls();
+
   rechopRow.append(
     rechopTitle,
+    ...(state.isDrumsMode && state.editContext && state.analysisKey ? [rechopGroup(tempoLabel, tempoInput, tempoHalfBtn, tempoDoubleBtn, tempoResetBtn)] : []),
     rechopGroup(rechopCountInput, rechopCountBtn),
     rechopGroup(rechopBarsSelect, rechopBarsBtn),
     rechopGroup(rechopAlignLabel, rechopFromLabel),
@@ -4380,6 +4542,34 @@ function renderFileResult(state) {
       current.every(([s, e], i) => Math.abs(s - last.regions[i][0]) <= tol && Math.abs(e - last.regions[i][1]) <= tol);
     if (untouched) runRechop(last.kind);
   });
+
+  /** Applies a manual tempo (null = back to detected) to this source and re-cuts the chops by bars at it. */
+  function applyTempoOverride(bpm) {
+    const key = state.analysisKey;
+    const entry = analysisCache.get(key);
+    setTempoOverride(key, bpm);
+    const effective = effectiveTempo(key, entry && entry.kt);
+    state.editContext.effectiveBpm = effective;
+    state.editContext.kt = { ...state.editContext.kt, bpm: effective };
+    state.editContext.barLocked = !!effective;
+    state.bpmText = formatBpmText(effective, tempoOverrides.has(key), !!(entry && entry.kt && entry.kt.available));
+    state.rechopBars = parseInt(rechopBarsSelect.value, 10);
+    log(`  ${state.fileName}: tempo ${tempoOverrides.has(key) ? "set to" : "reset to detected"} ${effective ? effective.toFixed(2) + " BPM" : "(none)"}.`);
+    runRechop("bars");
+  }
+  tempoInput.addEventListener("change", () => {
+    const sanitized = sanitizeSourceBpm(tempoInput.value);
+    if (sanitized == null) return refreshTempoControls();
+    applyTempoOverride(sanitized);
+  });
+  const scaleTempo = (factor) => {
+    const current = state.editContext.effectiveBpm;
+    const sanitized = current ? sanitizeSourceBpm(current * factor) : null;
+    if (sanitized != null) applyTempoOverride(sanitized);
+  };
+  tempoHalfBtn.addEventListener("click", () => scaleTempo(0.5));
+  tempoDoubleBtn.addEventListener("click", () => scaleTempo(2));
+  tempoResetBtn.addEventListener("click", () => applyTempoOverride(null));
 
   rechopCountBtn.addEventListener("click", () => runRechop("count"));
   rechopBarsBtn.addEventListener("click", () => runRechop("bars"));

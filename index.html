@@ -51,6 +51,8 @@
       <button type="button" class="seg-btn" data-task-choice="both" title="Cut it up and process it, with every option available.">Both</button>
       <button type="button" class="seg-btn" data-task-choice="nice" title="Conform loops to a shared tempo and key, so unrelated samples play nice together.">Play nice</button>
       <button type="button" class="seg-btn" data-task-choice="flip" title="Give one loop back to you wrong - automatic remixes of it, eight at a time.">Flip</button>
+      <button type="button" class="seg-btn" data-task-choice="sfx" title="Melt a drum break into a bank of aggressively time-stretched break-malfunction FX.">Stretch FX</button>
+      <button type="button" class="seg-btn" data-task-choice="lab" title="Grow unfamiliar processing graphs from low-level DSP primitives - NEW, MUTATE, KEEP.">Lab</button>
     </div>
 
     <div class="topbar-right">
@@ -209,8 +211,8 @@
           <div class="field" id="timestretch-ratio-row" hidden>
             <label for="timestretch-ratio-input">Stretch amount</label>
             <div class="slider-row">
-              <input id="timestretch-ratio-input" type="range" min="25" max="400" step="1" value="100" />
-              <input id="timestretch-ratio-value" type="number" class="slider-number" min="25" max="400" step="1" value="100" />
+              <input id="timestretch-ratio-input" type="range" min="0" max="1000" step="1" value="302" />
+              <input id="timestretch-ratio-value" type="number" class="slider-number slider-number-wide" min="5" max="100000" step="1" value="100" />
               <span class="slider-unit">%</span>
             </div>
           </div>
@@ -385,6 +387,18 @@
              which owns all of its own state; CHOP, STRETCH, BOTH and PLAY NICE are unaffected by
              it. Shown/hidden from updateFlipVisibility() in app.js. -->
         <div id="flip-workspace" class="flip-workspace" hidden></div>
+
+        <!-- STRETCH FX's own workspace: one drum break in, a bank of aggressively time-stretched
+             fragments of it out, auditioned solo or snapped back into the break. Built by
+             js/stretch-fx/controller.js, which owns all of its own state, the same way FLIP does.
+             Shown/hidden from updateStretchFxVisibility() in app.js. -->
+        <div id="stretch-fx-workspace" class="stretch-fx-workspace" hidden></div>
+
+        <!-- LAB's own workspace: one loop in, a deterministic search over low-level DSP primitives
+             out - NEW/MUTATE/KEEP over a seeded, inspectable processing graph. Built by
+             js/lab/controller.js, which owns all of its own state, the same way FLIP and STRETCH FX
+             do. Shown/hidden from updateLabVisibility() in app.js. -->
+        <div id="lab-workspace" class="lab-workspace" hidden></div>
 
         <div id="results-panel" class="results-panel"></div>
       </main>

@@ -16,7 +16,7 @@ import { toMono } from "../../dsp.js";
 import { ifft, nextPow2 } from "./fft.js";
 import { getWindow } from "./windows.js";
 import { makeRng, deriveSeed } from "./rng.js";
-import { analyzeFrame, normalizeOverlapAdd } from "./stft.js";
+import { analyzeFrame, normalizeOverlapAdd, planHops } from "./stft.js";
 
 /** Smooths a magnitude spectrum across neighbouring bins - the "smear" macro's spectral half. */
 function smoothMagnitudeInPlace(mag, half, amount) {
@@ -45,8 +45,8 @@ export function stretchPaulstretch(channels, sampleRate, ratio, params, seed) {
   const fftSize = nextPow2(Math.max(256, Math.round(((p.windowMs ?? 250) / 1000) * sampleRate)));
   const half = fftSize / 2;
   const hopDivisor = Math.max(4, p.overlap ?? 8);
-  const Ha = Math.max(1, Math.round(fftSize / hopDivisor));
-  const Hs = Math.max(1, Math.round(Ha * ratio));
+  // Ha may come back fractional for big ratios (see planHops) - frame m reads at floor(m * Ha).
+  const { Ha, Hs } = planHops(fftSize, hopDivisor, ratio);
   const window = getWindow("hann", fftSize);
   const smear = Math.max(0, Math.min(1, p.smear ?? 0.3));
   const frameBlend = Math.max(0, Math.min(0.95, p.frameBlend ?? smear * 0.5));
@@ -64,7 +64,7 @@ export function stretchPaulstretch(channels, sampleRate, ratio, params, seed) {
     let prevMag = null;
 
     for (let m = 0; m < numFrames; m++) {
-      const analysisPos = m * Ha;
+      const analysisPos = Math.floor(m * Ha);
       const synthesisPos = m * Hs;
       if (synthesisPos > outLen + fftSize) break;
 

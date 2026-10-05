@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import { fft, ifft, nextPow2, wrapPhase } from "../js/dsp/stretch/fft.js";
 import { makeRng } from "../js/dsp/stretch/rng.js";
-import { stretchChannels, ratioForTargetTempo, resolveCharacter, CHARACTERS, characterGroups } from "../js/dsp/stretch/index.js";
+import { stretchChannels, ratioForTargetTempo, resolveCharacter, CHARACTERS, characterGroups, DEFAULT_MAX_RATIO, MAX_OUTPUT_SECONDS } from "../js/dsp/stretch/index.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -196,26 +196,74 @@ test("stretchChannels: output length is roughly right (within 15%) for ratio 2 a
   }
 });
 
-test("stretchChannels: extreme stretch ratios (well beyond a character's own clamp) don't crash and stay finite", () => {
-  const input = tone(1.0, 220);
-  for (const key of ["spectral", "infinite", "frozen", "drone", "clean", "grain", "stutter"]) {
-    const [out] = stretchChannels([input], SR, 500, key, { seed: 1 });
+test("stretchChannels: extreme stretch ratios (well beyond the clamp) don't crash and stay finite", () => {
+  const input = tone(0.05, 220);
+  for (const key of ["spectral", "infinite", "frozen", "drone", "clean", "grain", "stutter", "cyclic"]) {
+    const [out] = stretchChannels([input], SR, 50000, key, { seed: 1 });
     assert.ok(isFiniteBuffer(out), `${key}: extreme ratio should still be finite (clamped internally)`);
     assert.ok(out.length > input.length, `${key}: extreme ratio should still stretch, not shrink`);
   }
 });
 
-test("stretchChannels: paulstretch/spectral-freeze characters support large stretch ratios for long ambient textures", () => {
-  const input = tone(1.5, 220);
-  for (const key of ["spectral", "infinite", "frozen", "drone"]) {
-    const character = resolveCharacter(key);
-    const bigRatio = character.maxRatio;
-    assert.ok(bigRatio >= 30, `${key}: expected a large maxRatio for extreme textures, got ${bigRatio}`);
+test("stretchChannels: every character reaches large stretch ratios for long textures", () => {
+  const input = tone(0.3, 220);
+  const bigRatio = 100;
+  assert.ok(DEFAULT_MAX_RATIO >= 1000, `expected a huge default cap, got ${DEFAULT_MAX_RATIO}`);
+  for (const key of Object.keys(CHARACTERS)) {
     const [out] = stretchChannels([input], SR, bigRatio, key, { seed: 1 });
     assert.ok(isFiniteBuffer(out));
     const dev = Math.abs(out.length - input.length * bigRatio) / (input.length * bigRatio);
     assert.ok(dev < 0.2, `${key}: length off by ${(dev * 100).toFixed(1)}% at ratio ${bigRatio}`);
   }
+});
+
+test("stretchChannels: STFT characters don't break up into silent gaps at big ratios", () => {
+  // Regression: synthesis hop used to scale with the ratio, so past ~overlap x the frames stopped
+  // overlapping and a steady tone came out as blips separated by silence.
+  const input = tone(1.5, 220); // longer than Infinite's 500ms window, so edge fades don't count as gaps
+  const block = Math.round(SR * 0.01);
+  for (const key of ["transient", "punch", "phase", "metallic", "spectral", "infinite", "frozen", "drone"]) {
+    for (const ratio of [8, 40]) {
+      const [out] = stretchChannels([input], SR, ratio, key, { seed: 1 });
+      let silent = 0;
+      let blocks = 0;
+      for (let s = Math.floor(out.length * 0.1); s + block < out.length * 0.9; s += block) {
+        let e = 0;
+        for (let i = 0; i < block; i++) e += out[s + i] * out[s + i];
+        blocks++;
+        if (Math.sqrt(e / block) < 0.02) silent++;
+      }
+      assert.ok(silent / blocks < 0.1, `${key} at ${ratio}x: ${((100 * silent) / blocks).toFixed(0)}% of the middle is silent`);
+    }
+  }
+});
+
+test("stretchChannels: output length is capped at MAX_OUTPUT_SECONDS whatever the ratio", () => {
+  const input = tone(1.0, 220);
+  const [out] = stretchChannels([input], SR, 1000, "cyclic");
+  assert.ok(out.length <= MAX_OUTPUT_SECONDS * SR + 1, `expected <= ${MAX_OUTPUT_SECONDS}s, got ${(out.length / SR).toFixed(1)}s`);
+  assert.ok(out.length >= MAX_OUTPUT_SECONDS * SR * 0.99);
+});
+
+test("cyclic: every cycle is an untouched copy of the source read at the output clock - no splice search", () => {
+  const n = Math.round(0.5 * SR);
+  const noise = new Float32Array(n);
+  const rng = makeRng(3);
+  for (let i = 0; i < n; i++) noise[i] = rng.signed() * 0.5;
+  const ratio = 8;
+  const [out] = stretchChannels([noise], SR, ratio, "cyclic", { macroValues: { cycle: 50, crossfade: 0 } });
+  const cycle = Math.round(0.06 * SR); // crossfade 0 -> cycles butt up, hop == cycle length
+  for (const c of [1, 5, 17, 40]) {
+    const dst = c * cycle;
+    const src = Math.round(dst / ratio);
+    for (let i = 0; i < cycle; i += 97) assert.equal(out[dst + i], noise[src + i], `cycle ${c} sample ${i}`);
+  }
+});
+
+test("cyclic: stereo channels share one cycle grid", () => {
+  const l = tone(0.4, 220);
+  const [a, b] = stretchChannels([l, Float32Array.from(l)], SR, 3, "cyclic12");
+  assert.deepEqual(Array.from(a), Array.from(b));
 });
 
 // ---------------------------------------------------------------------------

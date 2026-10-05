@@ -13,7 +13,7 @@ site on GitHub Pages.
 
 ## Features
 
-- **Five tasks, not a difficulty setting.** The app opens on one question:
+- **Seven tasks, not a difficulty setting.** The app opens on one question:
   what are you here to do?
   - **Chop** cuts audio into chops and one-shots. No processing at all -
     original tempo, no colouration.
@@ -28,6 +28,14 @@ site on GitHub Pages.
     whole bars down to micro-fragments, with key-aware pitch mutation. Click
     through until one of them is better than what you started with. See
     [Flip](#flip) below.
+  - **Stretch FX** takes a drum break and melts bits of it into a bank of
+    aggressively time-stretched "break malfunction" FX - the stretched snare,
+    the smeared quarter, the reversed granular suck - and lets you hear each
+    one snapped back into the break. See [Stretch FX](#stretch-fx) below.
+  - **Lab** grows small, unfamiliar DSP algorithms out of low-level
+    primitives - not named effects - and lets you search the space of what
+    they can do: NEW for a fresh graph, MUTATE for a related one, KEEP for
+    the ones worth coming back to. See [Lab](#lab) below.
 
   This replaced a Simple/Advanced toggle, which was the wrong axis: it
   described how much of the interface you could see, said nothing about what
@@ -1056,6 +1064,168 @@ Dusty Piano Cm 80 BPM_FLIP_03_seed458577206.wav
 - Pitch needs a region of at least ~1024 samples to shift, so transpositions on
   extremely short micro-fragments are skipped rather than smeared.
 
+## Stretch FX
+
+> CRRRRRRRRRAAAAAAASHHHHH - and straight back into the break.
+
+A sound-design tool, not a tempo tool. The stretch is supposed to be audible:
+grain, smear, metallic ringing, rhythmic throb. Drop a break, press
+**GENERATE 8**, click down the cards, **MUTATE** the nearly-theres and
+**EXPORT** the good ones.
+
+### The workflow
+
+1. Pick **Stretch FX** and drop a drum break on the page.
+2. Check the tempo. It's the grid the 1/16, 1/8 and 1/4 sources are cut on
+   and what Snap Back returns on. Jungle breaks are routinely detected at
+   half time. When the snares sit on 2 and 4 at a different tempo from the
+   detected one, a **snares say 170 →** chip offers the fix in one click.
+3. Press **GENERATE**. Eight cards appear and fill in as each one renders on
+   the background worker. The page never freezes, even at 1600%.
+4. Click a card to hear it. **Snap back** (the default) plays it inside the
+   break; **Solo** plays just the sample.
+5. **MUTATE** a card for a related take, or **EXPORT** it. **Export all**
+   writes the whole bank.
+
+### Sources
+
+| | |
+| --- | --- |
+| **Auto** (default) | A mixture: each result picks the kind of fragment it's best at. |
+| **Snare** | Likely snares, scored on their sound and extra credit for sitting on 2 or 4, with half a beat to a beat of tail. |
+| **Hit** | Any detected hit - kicks, hats, ghosts, the crash. |
+| **1/16, 1/8, 1/4** | Grid-aligned fragments, favouring bar ends, the last bar of the phrase, and the fragment that runs into a strong downbeat. A grid start next to a real transient is pulled onto it. |
+
+Or drag across the break yourself - the start snaps onto the nearest
+transient (Alt-drag to take it exactly as drawn) - and press **MAKE STRETCH
+FX** for a bank made entirely from that region.
+
+Detection is the app's own: the onset curve, one-shot windows and drum
+classifier CHOP uses, and the shared beat-grid fit. On top of that STRETCH
+FX lets the snares settle which beat is beat 1, because breakbeats put half
+their kicks on the "and" and that fools a kick-led fit.
+
+### What happens to them
+
+A bank is built from musical ideas rather than every combination: a stretched
+snare, a metal snare, a smeared quarter, a granular suck (stretched then
+reversed), a pitched-down crash, a sixteenth buzz, a pre-downbeat throb and a
+phrase-end mangle, with more (hit drones, stretched-twice, pitched-up metal,
+reverse snares) in banks of 12 or 16. Each is a recipe - optional reverse,
+sampler-style varispeed pitch, one or two passes through the app's own
+stretch engine (any character, Akai-style Cyclic included), then saturation
+and crunch from the output stage - rendered from 150% up to 1600%.
+
+- **Melt** moves the whole bank hotter or cooler. Every bank still runs from
+  "recognisably a stretched snare" to "what happened to the sampler", mildest
+  first.
+- **Character** picks a corner of the stretch engine: Anything, Old sampler,
+  Metal, Grain or Smear.
+
+Results are level-matched to the fragment they came from and never clip. The
+fades at the edges are a fraction of a millisecond in front of a transient,
+so the hit isn't softened, and longer only where the edge is a tail.
+
+### Snap back
+
+`BREAK → BREAK → STREEEEEEETCH → BANG → BREAK`. At least two beats of the
+original lead in from a bar line. The result replaces the break from the
+fragment's own start. The break comes back on the downbeat if one is within a
+beat of the result's end, otherwise on beat 3, otherwise on the next beat.
+The break is treated as a loop, so a lead-in before 0:00 comes from its last
+bar.
+
+### Export
+
+`breakname_stretch_snare_300.wav`, `breakname_stretch_1-8_600_rev.wav`,
+`breakname_stretch_hit_400_revpost_dn12.wav`: source, percent, then only the
+treatments that happened. Export All writes a `breakname_STRETCH_FX` folder,
+or a zip, and never overwrites. Names already in the folder get `_2`.
+
+## Lab
+
+> Not a random multi-FX unit. A machine for discovering unfamiliar audio
+> transformations, and a way to get back to the one you just found.
+
+Every other mode chains named effects - stretch, drive, crunch, output-stage
+character. **Lab** doesn't: it builds small DSP algorithms out of low-level
+mathematical primitives - a sample's own derivative, a delay tap whose length
+is set by the signal's own amplitude, a spectral bin permutation fed by its
+own frame-to-frame flux, a nonlinear feedback loop a handful of samples
+long - and chains three to six of them into a graph. Nothing in the primitive
+vocabulary is reverb, delay, chorus, flanger, phaser, distortion,
+compression, EQ, pitch-shifting, ring modulation, bitcrushing or granular
+processing by name; some results will coincidentally land near one of those,
+which is fine, but none of them are built in as a shortcut. Everything runs
+locally, deterministically, in plain JavaScript - no AI in the audio path.
+
+### The workflow
+
+1. Pick **Lab** and drop a loop on the page.
+2. Press **NEW**. It draws a fresh processing graph from the primitive
+   registry, renders it, and - if the result is safe and different enough
+   from the source to be worth hearing - shows it as the current mutant.
+3. Flip **ORIGINAL / MUTANT** to A/B them; both play from the same waveform,
+   looping, so switching is one click, not a restart.
+4. **MUTATE** for a related descendant of whatever's currently loaded - same
+   idea, a couple of things nudged, rather than a fresh roll. Repeat until
+   something's genuinely strange.
+5. **KEEP** it. Kept mutants persist across a reload (localStorage), with a
+   one-click **Load** back to exactly that graph.
+6. **Export WAV** writes the current mutant to disk.
+
+### Seeds
+
+Every mutant shows its **SEED**, and the field is an input: type a seed and
+press **Load** (or Enter) to reproduce that exact graph, byte for byte -
+same primitives, same order, same parameters, same macro wiring. All of
+Lab's randomness runs through the same seeded generator the rest of the app
+uses for reproducible creative decisions (`js/dsp/stretch/rng.js`); nothing
+in the primitive vocabulary or the generator calls `Math.random()`.
+
+NEW and MUTATE both search rather than gambling once: a candidate that's
+broken, near-silent, or reads as "the source, plus gain or polarity" is
+rejected and a deterministically-derived next seed is tried instead, up to
+24 attempts. The seed shown on the result is whichever attempt actually
+produced it, so reloading that seed later needs no search at all - it's
+just the graph.
+
+### Macros
+
+Every mutant exposes four generic controls, **A/B/C/D**. What each one
+actually touches is decided per-mutant by the generator - A might be a
+feedback coefficient in one graph and a spectral-flux gain in the next -
+and several internal parameters can respond to the same macro at once.
+Moving one re-renders live; it never changes which graph you're listening
+to, only its live parameter state.
+
+### Safety
+
+A graph is allowed to be unstable-looking on paper (short nonlinear feedback
+loops, signal-dependent delay taps) but never on the speaker: every render
+passes through a fixed DC-blocker and a soft limiter, and NaN/Infinity are
+sanitised to silence rather than reaching the output buffer at all. This
+happens on *every* render - NEW, MUTATE, a typed seed, a KEEP recall, a
+macro move - not only during the NEW/MUTATE search.
+
+### Inspecting a mutant
+
+A mutant is not an opaque blob. The **Inspect this mutant** panel lists
+every primitive in the graph with its live parameter values, what each
+macro is currently wired to, and the graph's full JSON (copyable) - enough
+to understand what's actually happening, and to pull a genuinely good find
+out into a hand-written, standalone effect later.
+
+### What it's for
+
+The point of a Lab session isn't a polished effect, it's a search:
+`load a loop → NEW → listen → NEW → listen → interesting! → KEEP → MUTATE →
+listen → MUTATE → genuinely strange → KEEP`. Plenty of mutants will sound
+bad, ugly or simply broken-in-an-uninteresting-way - that's expected and not
+filtered out beyond the safety/novelty checks above. Unexpected is the
+point; unsafe and identical-to-the-input are the only things actually
+rejected.
+
 ## Quick start
 
 **You must serve this folder over local HTTP - do not just double-click
@@ -1421,6 +1591,7 @@ node test/play-nice-naming.test.mjs
 node test/play-nice-downbeat.test.mjs
 node test/flip-recipe.test.mjs
 node test/flip-render.test.mjs
+node test/stretch-fx.test.mjs
 ```
 
 There are also a few optional browser-integration tests that exercise the

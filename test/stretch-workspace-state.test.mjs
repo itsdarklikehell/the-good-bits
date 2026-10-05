@@ -2,7 +2,7 @@
 // behind the Stretch workspace's "is this preview still current" indicator and its Randomise button.
 // Run with: node test/stretch-workspace-state.test.mjs
 import assert from "node:assert/strict";
-import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, mapPreviewPosition } from "../js/dsp/stretch/workspace-state.js";
+import { stretchRenderSignature, isProcessedPreviewStale, randomiseMacroValues, randomSeed, mapPreviewPosition, RATIO_PCT_MIN, RATIO_PCT_MAX, RATIO_SLIDER_STEPS, sliderToRatioPct, ratioPctToSlider, tidyRatioPct } from "../js/dsp/stretch/workspace-state.js";
 
 let passed = 0;
 function test(name, fn) {
@@ -135,3 +135,22 @@ test("mapPreviewPosition: falls back to 0 for an unusable (zero/negative/NaN) du
 });
 
 console.log(`\n${passed} test(s) passed.`);
+
+test("ratio slider: log scale spans 5%..100000% with 100% near the middle-left and round-trips typed values", () => {
+  assert.equal(sliderToRatioPct(0), RATIO_PCT_MIN);
+  assert.equal(sliderToRatioPct(RATIO_SLIDER_STEPS), RATIO_PCT_MAX);
+  assert.equal(sliderToRatioPct(ratioPctToSlider(100)), 100);
+  for (const pct of [5, 50, 100, 250, 1000, 5000, 100000]) {
+    const back = sliderToRatioPct(ratioPctToSlider(pct));
+    assert.ok(Math.abs(back - pct) / pct < 0.02, `${pct}% -> slider -> ${back}%`);
+  }
+});
+
+test("tidyRatioPct: clamps into range and rounds big values to readable steps", () => {
+  assert.equal(tidyRatioPct(1), RATIO_PCT_MIN);
+  assert.equal(tidyRatioPct(999999), RATIO_PCT_MAX);
+  assert.equal(tidyRatioPct("abc"), 100);
+  assert.equal(tidyRatioPct(137.4), 137);
+  assert.equal(tidyRatioPct(1234), 1230);
+  assert.equal(tidyRatioPct(23456), 23500);
+});
